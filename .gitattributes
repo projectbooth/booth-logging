@@ -1,0 +1,4 @@
+# Store and check out every text file with LF, whatever core.autocrlf says. booth-e2e copies
+# this checkout onto a Linux droplet as raw files (ADR 0055), and a CRLF shell script or chart
+# template must never reach it.
+* text=auto eol=lf
