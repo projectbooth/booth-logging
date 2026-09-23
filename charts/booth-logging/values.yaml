@@ -1,0 +1,147 @@
+# Default values for booth-logging.
+#
+# Three workloads, one release:
+#   - the viewer API (Deployment)  — what booth-core's gateway routes /modules/logging/* to
+#   - Loki (StatefulSet)           — stores and indexes the logs
+#   - the collector (DaemonSet)    — Grafana Alloy on every node, tailing /var/log/pods
+# Modules integrate with none of this: they write to stdout/stderr and are collected
+# automatically (ADR 0022).
+
+replicaCount: 1
+
+image:
+  repository: ghcr.io/projectbooth/booth-logging
+  tag: "" # defaults to Chart.appVersion
+  pullPolicy: IfNotPresent
+
+service:
+  port: 8080
+
+oidc:
+  # Required: the same OIDC issuer/client every module verifies against independently
+  # (core-platform-api.md's defense-in-depth requirement).
+  issuerUrl: ""
+  clientId: ""
+  requireAudience: true
+  # Must match booth-core's BOOTH_OIDC_GROUPS_CLAIM: the caller's role is re-derived from
+  # this claim, never taken from the forwarded X-Booth-Role alone (ADR 0041).
+  groupsClaim: groups
+  # Optional: booth-core's issuer URL, to also accept its workload tokens (ADR 0056).
+  workloadIssuerUrl: ""
+
+# Who may read logs. Logs are cluster-wide — every module's output, mentioning every
+# workspace — so access is NOT scoped by workspace. Only workspace owners are ever allowed.
+#
+# workspaces: [] (the default) lets the owner of ANY workspace read ALL logs. That is only
+# right when every workspace owner is trusted operator staff (e.g. a single-tenant install);
+# the service logs a warning at startup while it's left open. List one or more workspaces
+# (typically a dedicated "platform"/"ops" workspace) to restrict reading to their owners.
+# See docs/decisions/0002-log-access-policy.md.
+access:
+  workspaces: []
+
+# Optional cap on one query's time span, as a Go duration (e.g. "24h"). Empty means the
+# full retention window.
+queryMaxRange: ""
+
+loki:
+  image:
+    repository: grafana/loki
+    tag: "3.7.8"
+    pullPolicy: IfNotPresent
+
+  # How long logs are kept, in whole days. Loki's compactor deletes anything older, and
+  # queries never reach further back than this.
+  #
+  # 14 days by default (ruling of 2026-09-22: short, 7-14 days, configurable). Why 14 and
+  # not 7: these logs are for operational debugging, and the problems that need them are
+  # often noticed late — something that started before a long weekend or a week off, or a
+  # regression you want to compare against "the same time last week". Seven days loses
+  # exactly that comparison. Loki compresses heavily, so the second week costs little disk
+  # (see persistence.size). Changing it later is just this value; nothing else changes.
+  # See docs/decisions/0001-retention-default.md.
+  retentionDays: 14
+
+  logLevel: info
+
+  persistence:
+    # Without persistence, all logs are lost whenever the Loki pod restarts.
+    enabled: true
+    # Sized for a small cluster at the default 14-day retention. Raise it for chattier
+    # clusters (roughly: compressed daily volume x retentionDays, plus headroom).
+    size: 20Gi
+    storageClass: ""
+
+  resources: {}
+
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 10001 # the loki image's own user
+    runAsGroup: 10001
+    fsGroup: 10001
+    seccompProfile:
+      type: RuntimeDefault
+
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: ["ALL"]
+
+collector:
+  image:
+    # Grafana Alloy. ADR 0022 names Promtail or Grafana Agent, but both are end-of-life
+    # (Agent: Nov 2025, Promtail: Mar 2026) and Alloy is their named successor.
+    # See docs/decisions/0003-collector-grafana-alloy.md.
+    repository: grafana/alloy
+    tag: "v1.19.2"
+    pullPolicy: IfNotPresent
+
+  # Namespaces whose pods are NOT collected. Empty collects every pod on every node, which
+  # is what ADR 0022 asks for.
+  excludeNamespaces: []
+
+  # Where Alloy keeps its read positions on each node, so a collector restart resumes where
+  # it left off instead of re-shipping or skipping lines.
+  hostDataPath: /var/lib/booth-logging-collector
+
+  # Every node, control plane included, runs pods whose logs matter.
+  tolerations:
+    - operator: Exists
+
+  resources: {}
+
+  # Container log files under /var/log/pods are owned by root and not world-readable, so
+  # the collector runs as uid 0 — but with no capabilities, no privilege escalation, a
+  # read-only root filesystem, and the log directory mounted read-only.
+  securityContext:
+    runAsUser: 0
+    runAsGroup: 0
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: ["ALL"]
+    seccompProfile:
+      type: RuntimeDefault
+
+# Loki runs without authentication (it knows nothing about Booth identities). This policy
+# lets only the collector and the viewer API reach it, so nothing else in the cluster can
+# read every tenant's logs — or write forged ones — by going around the viewer. Needs a CNI
+# that enforces NetworkPolicy (k3s's default does).
+networkPolicy:
+  enabled: true
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+
+resources: {}

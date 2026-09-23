@@ -1,0 +1,10 @@
+apiVersion: v2
+name: booth-logging
+description: >
+  Project Booth's logging module: a node-level collector (Grafana Alloy DaemonSet) tailing
+  every pod's stdout/stderr into Grafana Loki, plus the native viewer's query API (ADR 0015,
+  ADR 0022).
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/projectbooth/booth-logging

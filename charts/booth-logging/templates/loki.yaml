@@ -1,0 +1,99 @@
+# Loki, single-binary mode on its own PersistentVolume: one StatefulSet, filesystem chunk
+# storage. Written directly rather than as a dependency on Grafana's `loki` chart, which is
+# built for multi-component, object-storage deployments and brings a gateway, caches and a
+# canary this module doesn't need — the same trade-off booth-core made for its bundled
+# PostgreSQL (ADR 0054). See docs/decisions/0004-loki-single-binary.md.
+# Config: loki-config.yaml.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "booth-logging.lokiName" . }}
+  labels:
+    {{- include "booth-logging.labels" . | nindent 4 }}
+    app.kubernetes.io/component: loki
+spec:
+  replicas: 1
+  serviceName: {{ include "booth-logging.lokiName" . }}
+  selector:
+    matchLabels:
+      {{- include "booth-logging.selectorLabels" (dict "ctx" . "component" "loki") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "booth-logging.labels" . | nindent 8 }}
+        app.kubernetes.io/component: loki
+      annotations:
+        # Roll the pod when the config (e.g. retention) changes.
+        checksum/config: {{ include (print $.Template.BasePath "/loki-config.yaml") . | sha256sum | trunc 16 }}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        {{- toYaml .Values.loki.podSecurityContext | nindent 8 }}
+      containers:
+        - name: loki
+          image: "{{ .Values.loki.image.repository }}:{{ .Values.loki.image.tag }}"
+          imagePullPolicy: {{ .Values.loki.image.pullPolicy }}
+          args: ["-config.file=/etc/loki/config.yaml", "-target=all"]
+          securityContext:
+            {{- toYaml .Values.loki.securityContext | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: 3100
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            initialDelaySeconds: 10
+          # Not /ready: Loki reports not-ready while its ingester warms up, and restarting it
+          # for that would only make it start over.
+          livenessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 30
+          volumeMounts:
+            - name: config
+              mountPath: /etc/loki
+            - name: data
+              mountPath: /loki
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            {{- toYaml .Values.loki.resources | nindent 12 }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "booth-logging.lokiName" . }}
+        - name: tmp
+          emptyDir: {}
+        {{- if not .Values.loki.persistence.enabled }}
+        - name: data
+          emptyDir: {}
+        {{- end }}
+  {{- if .Values.loki.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- with .Values.loki.persistence.storageClass }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.loki.persistence.size }}
+  {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "booth-logging.lokiName" . }}
+  labels:
+    {{- include "booth-logging.labels" . | nindent 4 }}
+    app.kubernetes.io/component: loki
+spec:
+  selector:
+    {{- include "booth-logging.selectorLabels" (dict "ctx" . "component" "loki") | nindent 4 }}
+  ports:
+    - name: http
+      port: 3100
+      targetPort: http

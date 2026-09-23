@@ -1,0 +1,64 @@
+name: Integration
+
+# Layer 3 (contracts/testing-strategy.md, ADR 0024): the chart deployed to a real kind
+# cluster, then test/integration/verify.sh — the collector really tails pods, Loki really
+# stores and labels what it ships, the NetworkPolicy really closes Loki. Runs on merge to
+# main and nightly. The same script was run by hand against a local kind cluster while this
+# module was built (see test/integration/README.md); this workflow file itself has not yet
+# run on GitHub.
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "30 8 * * *" # nightly
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  kind-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: helm/kind-action@v1
+        with:
+          cluster_name: booth-logging-ci
+
+      - uses: azure/setup-helm@v4
+
+      - name: Build and load the booth-logging image
+        run: |
+          docker build -t booth-logging:ci .
+          kind load docker-image booth-logging:ci --name booth-logging-ci
+
+      - name: Install vendored BoothModule CRD (test/integration/fixtures)
+        run: kubectl apply -f test/integration/fixtures/boothmodule-crd.yaml
+
+      - name: Install the chart
+        run: |
+          kubectl create namespace booth-logging
+          # A real, publicly reachable OIDC discovery document, only so the API's startup
+          # discovery succeeds; no login happens here (see test/integration/README.md).
+          helm install booth-logging charts/booth-logging \
+            --namespace booth-logging \
+            --set image.repository=booth-logging \
+            --set image.tag=ci \
+            --set image.pullPolicy=Never \
+            --set oidc.issuerUrl=https://accounts.google.com \
+            --set oidc.clientId=booth-logging-ci \
+            --set oidc.requireAudience=false \
+            --wait --timeout 6m
+
+      - name: Verify
+        run: test/integration/verify.sh
+
+      - name: Dump state on failure
+        if: failure()
+        run: |
+          kubectl -n booth-logging get all
+          kubectl -n booth-logging describe pods | tail -80
+          kubectl -n booth-logging logs daemonset/booth-logging-collector --tail=100 || true
+          kubectl -n booth-logging logs statefulset/booth-logging-loki --tail=100 || true
+          kubectl -n booth-logging logs deployment/booth-logging --tail=100 || true

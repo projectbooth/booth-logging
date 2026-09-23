@@ -1,0 +1,27 @@
+# Registers booth-logging with booth-core's module registry (ADR 0019): the BoothModule CR
+# is the only thing core reads to know this module exists (contracts/module-manifest.md).
+# Uses booth-core's own CRD type (booth.projectbooth.io/v1alpha1), not redefined here.
+#
+# Deliberately absent: `events` (publishes/subscribes nothing), `database` (Loki is the only
+# store), `workloadIdentity` (never calls another module), and `adminNavPath` — the whole
+# viewer is already owner-only, so there is no separate admin view to gate.
+apiVersion: booth.projectbooth.io/v1alpha1
+kind: BoothModule
+metadata:
+  name: logging
+  labels:
+    {{- include "booth-logging.labels" . | nindent 4 }}
+spec:
+  id: logging
+  displayName: Logs
+  icon: logs
+  version: {{ .Chart.AppVersion | quote }}
+  contractVersion: "0.1.0"
+  hasOwnUi: true
+  uiIntegrationMode: native
+  navGroup: manage
+  navPath: /logging
+  healthCheckPath: /healthz
+  serviceRef:
+    name: {{ include "booth-logging.fullname" . }}
+    port: {{ .Values.service.port }}

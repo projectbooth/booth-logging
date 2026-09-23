@@ -1,0 +1,10 @@
+# A real Loki for the Go tests' ingestion/query path (internal/loki, internal/api), the same
+# way booth-storage runs real MinIO/Azurite rather than mocking them. Used by CI (ci.yml) and
+# locally:  docker compose -f hack/docker-compose.loki.yml up -d --wait
+services:
+  loki:
+    image: grafana/loki:3.7.8
+    command: ["-config.file=/etc/loki/config.yaml"]
+    ports: ["3100:3100"]
+    volumes:
+      - ./loki-local.yaml:/etc/loki/config.yaml:ro

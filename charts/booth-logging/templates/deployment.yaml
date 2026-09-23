@@ -1,0 +1,88 @@
+# The viewer's query API. Needs no Kubernetes API access at all, so its service account
+# token isn't even mounted.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "booth-logging.fullname" . }}
+  labels:
+    {{- include "booth-logging.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "booth-logging.selectorLabels" (dict "ctx" . "component" "api") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "booth-logging.labels" . | nindent 8 }}
+        app.kubernetes.io/component: api
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: booth-logging
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: BOOTH_HTTP_ADDR
+              value: ":8080"
+            - name: BOOTH_LOKI_URL
+              value: {{ include "booth-logging.lokiURL" . | quote }}
+            # Loki enforces retention; the API only reports it and caps query ranges by it.
+            # Rendered from the same value as Loki's own config so the two can't disagree.
+            - name: BOOTH_LOGGING_RETENTION
+              value: "{{ include "booth-logging.retentionHours" . }}h"
+            {{- with .Values.queryMaxRange }}
+            - name: BOOTH_LOGGING_MAX_QUERY_RANGE
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.access.workspaces }}
+            - name: BOOTH_LOGGING_ACCESS_WORKSPACES
+              value: {{ join "," . | quote }}
+            {{- end }}
+            - name: BOOTH_OIDC_ISSUER_URL
+              value: {{ required "oidc.issuerUrl is required" .Values.oidc.issuerUrl | quote }}
+            - name: BOOTH_OIDC_CLIENT_ID
+              value: {{ required "oidc.clientId is required" .Values.oidc.clientId | quote }}
+            - name: BOOTH_OIDC_REQUIRE_AUDIENCE
+              value: {{ .Values.oidc.requireAudience | quote }}
+            - name: BOOTH_OIDC_GROUPS_CLAIM
+              value: {{ .Values.oidc.groupsClaim | quote }}
+            {{- with .Values.oidc.workloadIssuerUrl }}
+            - name: BOOTH_WORKLOAD_ISSUER_URL
+              value: {{ . | quote }}
+            {{- end }}
+          # /healthz (readiness, and what core polls) reflects Loki's readiness; /livez
+          # doesn't, because restarting this pod can't fix Loki.
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: http
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "booth-logging.fullname" . }}
+  labels:
+    {{- include "booth-logging.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+spec:
+  selector:
+    {{- include "booth-logging.selectorLabels" (dict "ctx" . "component" "api") | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.service.port }}
+      targetPort: http

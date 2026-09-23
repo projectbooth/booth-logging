@@ -1,0 +1,119 @@
+# The node-level collector: one Grafana Alloy pod per node, tailing that node's
+# /var/log/pods and shipping to Loki (ADR 0022). Pipeline: collector-config.yaml.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "booth-logging.collectorName" . }}
+  labels:
+    {{- include "booth-logging.labels" . | nindent 4 }}
+    app.kubernetes.io/component: collector
+---
+# Discovering pods (to label their log files) needs read access to pod metadata across the
+# cluster — pods only: no secrets, no configmaps, no write verbs.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "booth-logging.collectorName" . }}-{{ .Release.Namespace }}
+  labels:
+    {{- include "booth-logging.labels" . | nindent 4 }}
+    app.kubernetes.io/component: collector
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "booth-logging.collectorName" . }}-{{ .Release.Namespace }}
+  labels:
+    {{- include "booth-logging.labels" . | nindent 4 }}
+    app.kubernetes.io/component: collector
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "booth-logging.collectorName" . }}-{{ .Release.Namespace }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "booth-logging.collectorName" . }}
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "booth-logging.collectorName" . }}
+  labels:
+    {{- include "booth-logging.labels" . | nindent 4 }}
+    app.kubernetes.io/component: collector
+spec:
+  selector:
+    matchLabels:
+      {{- include "booth-logging.selectorLabels" (dict "ctx" . "component" "collector") | nindent 6 }}
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        {{- include "booth-logging.labels" . | nindent 8 }}
+        app.kubernetes.io/component: collector
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/collector-config.yaml") . | sha256sum | trunc 16 }}
+    spec:
+      serviceAccountName: {{ include "booth-logging.collectorName" . }}
+      {{- with .Values.collector.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: alloy
+          image: "{{ .Values.collector.image.repository }}:{{ .Values.collector.image.tag }}"
+          imagePullPolicy: {{ .Values.collector.image.pullPolicy }}
+          # Config and data live outside the image's own /etc/alloy and /var/lib/alloy: those
+          # belong to the image's alloy user, and a root process with every capability dropped
+          # can't traverse another user's private directory.
+          args:
+            - run
+            - /etc/booth-collector/config.alloy
+            - --storage.path=/var/lib/booth-collector
+            - --server.http.listen-addr=0.0.0.0:12345
+            - --disable-reporting
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          securityContext:
+            {{- toYaml .Values.collector.securityContext | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: 12345
+          readinessProbe:
+            httpGet:
+              path: /-/ready
+              port: http
+          volumeMounts:
+            - name: config
+              mountPath: /etc/booth-collector
+            - name: pod-logs
+              mountPath: /var/log/pods
+              readOnly: true
+            - name: data
+              mountPath: /var/lib/booth-collector
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            {{- toYaml .Values.collector.resources | nindent 12 }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "booth-logging.collectorName" . }}
+        - name: pod-logs
+          hostPath:
+            path: /var/log/pods
+            type: Directory
+        - name: data
+          hostPath:
+            path: {{ .Values.collector.hostDataPath }}
+            type: DirectoryOrCreate
+        - name: tmp
+          emptyDir: {}
