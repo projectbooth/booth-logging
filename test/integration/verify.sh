@@ -138,20 +138,25 @@ if [ -n "${GRAFANA_TOKENS:-}" ]; then
   g="http://$release-grafana.$ns:3000"
   # The Grafana NetworkPolicy admits only booth-core's pods; these probes wear its label.
   as_core() {
-    k -n "$probe_ns" run "$1" --rm -i --restart=Never --image=curlimages/curl       --labels=app.kubernetes.io/name=booth-core -- sh -c "$2" 2>/dev/null || true
+    k -n "$probe_ns" run "$1" --rm -i --restart=Never --image=curlimages/curl \
+      --labels=app.kubernetes.io/name=booth-core -- sh -c "$2" 2>&1 || true
   }
+  # A brand-new pod's first packets can be dropped while the NetworkPolicy controller catches
+  # up with its IP (seen on GitHub's kind runner, not locally), so retry connection-level
+  # failures. An HTTP response of any status is not retried, so a 401/403 still counts.
+  C="curl -sS -m 5 --retry 15 --retry-delay 2 --retry-all-errors"
 
   step "Grafana admits an owner as Editor"
-  out=$(as_core g-owner "curl -s -H 'X-Booth-Identity: $owner' $g/api/user/orgs")
+  out=$(as_core g-owner "$C -H 'X-Booth-Identity: $owner' $g/api/user/orgs")
   echo "$out" | grep -q '"role":"Editor"' || fail "owner not admitted as Editor: $out"
 
   step "Grafana refuses an editor outright"
-  out=$(as_core g-editor "curl -s -o /dev/null -w 'status=%{http_code}' -H 'X-Booth-Identity: $editor' $g/api/user/orgs")
+  out=$(as_core g-editor "$C -o /dev/null -w 'status=%{http_code}' -H 'X-Booth-Identity: $editor' $g/api/user/orgs")
   echo "$out" | grep -qE 'status=40[13]' || fail "editor not refused: $out"
 
   step "an admitted owner queries the real Loki through Grafana"
   body='{"from":"now-15m","to":"now","queries":[{"refId":"A","datasource":{"uid":"booth-loki"},"expr":"{module=\"itprobe\"} |= \"'"$marker"'\"","queryType":"range","maxLines":10}]}'
-  out=$(as_core g-query "curl -s -H 'X-Booth-Identity: $owner' -H 'Content-Type: application/json' -H 'Origin: $g' -d '$body' $g/api/ds/query")
+  out=$(as_core g-query "$C -H 'X-Booth-Identity: $owner' -H 'Content-Type: application/json' -H 'Origin: $g' -d '$body' $g/api/ds/query")
   echo "$out" | grep -q "$marker plain" || fail "Grafana query didn't return the probe's lines: $(echo "$out" | head -c 400)"
 
   step "Grafana is closed to pods other than booth-core's"
