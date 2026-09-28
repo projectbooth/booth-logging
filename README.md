@@ -3,8 +3,9 @@
 Project Booth's logging module (nav group **Manage**). Every pod on the cluster writes to
 stdout/stderr as usual. A node-level collector ships all of it to **Grafana Loki**, and a
 native viewer lets a workspace owner browse, filter and search it by module, time range and
-severity (ADR 0015, ADR 0022). Modules integrate nothing: there is no SDK, no ingestion API
-and no configuration. Brief: `../booth-architecture/agent-briefs/logging.md`.
+severity (ADR 0015, ADR 0022). A full **Grafana** view (ADR 0076) is registered next to it as
+a second module, `logging-grafana`. Modules integrate nothing: there is no SDK, no ingestion
+API and no configuration. Brief: `../booth-architecture/agent-briefs/logging.md`.
 
 ## What v0 delivers
 
@@ -16,19 +17,18 @@ and no configuration. Brief: `../booth-architecture/agent-briefs/logging.md`.
 | Native viewer: browse/filter/search by module, time range, severity | `web/` (`@projectbooth/logging-ui`), backed by `internal/api` |
 | Manifest + health check | `templates/boothmodule.yaml`, `/healthz` (reports Loki's readiness) |
 | CI per `contracts/testing-strategy.md` | `.github/workflows/` |
-| *Optional* Grafana view | **not built**, [0006](docs/decisions/0006-grafana-view-deferred.md) |
+| *Optional* Grafana view (ADR 0076) | `templates/grafana*.yaml`, second `BoothModule` `logging-grafana` (iframe-proxy), [0007](docs/decisions/0007-grafana-view-implementation.md) |
 
 ## How it fits together
 
 ```
- every node                                   release namespace
- ┌─────────────────────────┐                 ┌───────────────────────────────────────┐
- │ /var/log/pods/…/*.log ──┼─► Alloy (DS) ──►│ Loki (StatefulSet, PVC, 14d retention)│
- └─────────────────────────┘   push          │    ▲  NetworkPolicy: collector + API   │
-                                             │    │  only                             │
- browser ─► booth-core gateway ─────────────►│ booth-logging API ── LogQL ──┘         │
-   (@projectbooth/logging-ui)  /modules/logging/api/*                                   │
-                                             └───────────────────────────────────────┘
+ ingest:         each node's /var/log/pods ──► Alloy (DaemonSet) ──push──► Loki
+
+ native viewer:  browser ─► core gateway    /modules/logging/api/*    ─► booth-logging API ─► Loki
+ Grafana view:   browser ─► core iframe proxy /iframe/logging-grafana/* ─► Grafana           ─► Loki
+                 (core signs X-Booth-Identity; Grafana verifies it and admits owners only)
+
+ Loki's NetworkPolicy admits only the collector, the API and Grafana.
 ```
 
 - **Collector** (`collector-config.yaml`): discovers pods on its own node, tails their log
@@ -42,6 +42,37 @@ and no configuration. Brief: `../booth-architecture/agent-briefs/logging.md`.
 - **API** (`internal/api`): read-only. It turns structured filters into LogQL
   (`internal/logql`) and never accepts raw LogQL, so user input can't rewrite a query. It
   queries Loki and returns one newest-first timeline with a paging cursor.
+
+## The Grafana view (ADR 0076)
+
+> **This is a strictly more powerful surface than the native viewer, under the same access
+> rule.** Anyone admitted can run **arbitrary LogQL over every tenant's logs**. With
+> `access.workspaces` empty (the default), that means **the owner of any workspace**. On a
+> multi-tenant install set `access.workspaces`, or turn the view off with
+> `grafana.enabled=false`.
+
+- **Registration:** a second `BoothModule`: `id: logging-grafana`,
+  `uiIntegrationMode: iframe-proxy`, `navPath: /logging-grafana`, `navGroup: manage`, with its
+  `serviceRef` pointing at the Grafana Service. The native viewer's `logging` registration is
+  unchanged (module-manifest.md's multi-surface pattern).
+- **Authentication:** Grafana's own JWT auth over the `X-Booth-Identity` assertion booth-core
+  signs on every iframe-proxied request (ADR 0069). Grafana verifies the signature, `iss` and
+  `aud = logging-grafana` on every request. There's no Grafana login, no admin account, no
+  basic auth and no anonymous access.
+- **Keys:** Grafana only fetches a JWKS over https, and core's issuer is plain in-cluster http.
+  So the pod's `fetch-jwks` init container fetches core's keys at start and Grafana reads them
+  from a file ([0007](docs/decisions/0007-grafana-view-implementation.md)).
+  `grafana.identity.issuerUrl` must equal core's iframe-identity issuer **exactly**; the init
+  container refuses to start Grafana otherwise, naming both spellings. If core's key is ever
+  regenerated, Grafana refuses everyone until `kubectl rollout restart deploy/<release>-grafana`.
+- **Admission** is binary (ADR 0067). An owner of the active workspace (and, if
+  `access.workspaces` is set, of a listed workspace) is admitted as `Editor`, which is what
+  Explore needs. Everyone else is refused outright, never admitted at a lower role. Role sync
+  runs on every request, so losing ownership takes effect immediately. Editors can't change
+  data sources, users or settings.
+- **Loki data source** is provisioned read-only at this release's Loki. Loki's NetworkPolicy
+  admits Grafana. Grafana's own NetworkPolicy admits only booth-core's pods, as defense in
+  depth; the signature is the real boundary.
 
 ## API
 
@@ -62,23 +93,26 @@ its message), 504 (timeout) or 503 (unreachable).
 
 ## Stack
 
-The Go backend uses **Go** with `chi` and `go-oidc`. `internal/auth` is booth-storage's copy,
+The backend uses **Go** with `chi` and `go-oidc`. `internal/auth` is booth-storage's copy,
 including ADR 0041's token-derived role and ADR 0056's optional second issuer. The UI is
 **React + TypeScript + Vite + Tailwind**, published as `@projectbooth/logging-ui` (ADR 0030).
 It exports `LoggingApp`, which takes `{workspace, role, theme, getAccessToken}` (ADR 0031/0033).
-Images are pinned to `grafana/loki:3.7.8` and `grafana/alloy:v1.19.2`.
+Images are pinned to `grafana/loki:3.7.8`, `grafana/alloy:v1.19.2` and `grafana/grafana:13.2.2`.
 
 ```
 cmd/logging/          entrypoint (logs JSON lines to stdout, like every module should)
 internal/api/         HTTP routes, access policy, validation
 internal/logql/       structured filter → LogQL (the injection boundary)
 internal/loki/        read-only Loki client; lokitest/ runs tests against a real Loki
+internal/jwksfetch/   the Grafana pod's init container: fetch + check core's iframe-identity keys
 internal/auth/        OIDC verification + token-derived role (from booth-storage)
 web/                  the native viewer package
-charts/booth-logging/ API Deployment, Loki StatefulSet, collector DaemonSet, NetworkPolicy, BoothModule
+charts/booth-logging/ API Deployment, Loki StatefulSet, collector DaemonSet, Grafana, NetworkPolicies,
+                      two BoothModules (logging, logging-grafana)
 docs/decisions/       judgment calls the ADRs didn't settle — read these
 test/contract/        manifest + chart checks (helm template)
-test/integration/     verify.sh — real-cluster checks (kind)
+test/grafana/         the Grafana admission gate against a real Grafana (docker)
+test/integration/     verify.sh — real-cluster checks (kind), with a stub of core's issuer
 hack/                 docker-compose Loki for the Go tests
 ```
 
@@ -91,8 +125,9 @@ go test ./...                                             # unit + contract (+ r
 (cd web && npm ci && npm run typecheck && npm run lint && npm test -- --run && npm run build)
 ```
 
-Without the Loki container the real-Loki tests **skip** locally. CI sets
-`BOOTH_TEST_STRICT=1`, which turns a missing Loki or `helm` into a failure. `test/contract`
+Without the Loki container the real-Loki tests **skip** locally, and so do `test/grafana`'s
+real-Grafana tests, which also need docker. CI sets `BOOTH_TEST_STRICT=1`, which turns any
+missing piece into a failure. `test/contract`
 needs `helm`. Real-cluster checks: install the chart and run `test/integration/verify.sh`
 (see `test/integration/README.md`).
 
@@ -109,9 +144,12 @@ register it: `registerNativeModule("logging", LoggingApp)`.
 
 ## Read before deploying
 
-- **Access** ([0002](docs/decisions/0002-log-access-policy.md)): by default **the owner of any
-  workspace can read every tenant's logs**, and the API logs a warning saying so. On a
-  multi-tenant install, set `access.workspaces` (e.g. `[platform]`).
+- **Access** (ADR 0067, [0002](docs/decisions/0002-log-access-policy.md)): by default **the
+  owner of any workspace can read every tenant's logs**, and the API logs a warning saying so.
+  On a multi-tenant install, set `access.workspaces` (e.g. `[platform]`). The same rule
+  governs the **Grafana view**, where admitted people can run arbitrary LogQL (see above).
+- **Grafana's issuer URL** (`grafana.identity.issuerUrl`) must match booth-core's iframe-identity
+  issuer exactly. The default assumes core is release `booth-core` in namespace `booth-system`.
 - **The collector runs as root** (uid 0, no capabilities, read-only root filesystem,
   `/var/log/pods` mounted read-only), because the kubelet's log files aren't world-readable. It
   holds a ClusterRole to get/list/watch **pods** (metadata only) and nothing else.
@@ -124,7 +162,11 @@ register it: `registerNativeModule("logging", LoggingApp)`.
 
 ## Not done / known limits
 
-- **No Grafana view** ([0006](docs/decisions/0006-grafana-view-deferred.md)).
+- **The Grafana view hasn't run behind a real booth-core and shell.** Its admission gate is
+  tested against a real Grafana (docker and kind) with assertions signed like core's, but by a
+  stand-in issuer. Nothing has yet loaded it through core's iframe proxy in a browser.
+- **Grafana state is ephemeral** (`emptyDir`): dashboards someone saves are lost when the pod
+  restarts.
 - **Audit-style structured events:** nothing concrete has come up that needs a path beyond
   stdout, so none was built. ADR 0022 keeps this a separate concern. Nothing in this repo
   would block adding one later.

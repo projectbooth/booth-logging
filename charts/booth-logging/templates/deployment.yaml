@@ -43,9 +43,9 @@ spec:
             - name: BOOTH_LOGGING_MAX_QUERY_RANGE
               value: {{ . | quote }}
             {{- end }}
-            {{- with .Values.access.workspaces }}
+            {{- with include "booth-logging.accessWorkspaces" . }}
             - name: BOOTH_LOGGING_ACCESS_WORKSPACES
-              value: {{ join "," . | quote }}
+              value: {{ . | quote }}
             {{- end }}
             - name: BOOTH_OIDC_ISSUER_URL
               value: {{ required "oidc.issuerUrl is required" .Values.oidc.issuerUrl | quote }}

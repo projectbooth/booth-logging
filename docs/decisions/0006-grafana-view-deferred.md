@@ -1,9 +1,25 @@
 # 0006: The optional Grafana view is not in this first pass
 
-Status: **deferral ratified** — `booth-architecture` ADR 0068. The brief marks the view optional
-(ADR 0015's "Grafana as an optional iframe-proxied power-user view").
+Status: **superseded — the deferral is lifted.** `booth-architecture` ADR 0076 (2026-09-28)
+resolved the blocker below. The view is built: see [0007](0007-grafana-view-implementation.md)
+and the README. The original reasoning is kept below as written. (The deferral itself was
+ratified in ADR 0068.)
 
-## Why not now
+## What resolved it
+
+- **Who may read logs** was settled by ADR 0067 (owner role, optional `access.workspaces`
+  allowlist).
+- **What core forwards on the iframe path** was settled by ADR 0069. Core signs an
+  `X-Booth-Identity` JWT (RS256, `aud` = module id, ADR 0025 `groups`) on every iframe-proxied
+  request and publishes the keys to verify it.
+- ADR 0076 chose a stronger version of option 2 below. Grafana's own JWT auth cryptographically
+  verifies that assertion, rather than `auth.proxy` trusting a bare header. A forged header
+  would need core's signing key, not just network position. It also chose a second
+  `BoothModule` registration (`logging-grafana`) over a manifest contract change.
+
+---
+
+## Why not now (original, 2026-09-22)
 
 Adding Grafana is mostly chart work. The reason to hold off is access control. Grafana pointed
 at Loki can run any LogQL over every tenant's logs, so it has to enforce at least the same rule

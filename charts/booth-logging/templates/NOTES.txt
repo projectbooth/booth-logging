@@ -1,0 +1,32 @@
+booth-logging {{ .Chart.AppVersion }} is installed in namespace {{ .Release.Namespace }}.
+
+Every pod's stdout/stderr is collected into Loki (retention: {{ .Values.loki.retentionDays }} days).
+Native viewer: nav entry "Logs" (module id: logging).
+{{- if .Values.grafana.enabled }}
+Grafana view:  nav entry "Logs (Grafana)" (module id: logging-grafana).
+{{- end }}
+
+WHO CAN READ LOGS (ADR 0067)
+{{- if .Values.access.workspaces }}
+  Only OWNERS acting in these workspaces: {{ join ", " .Values.access.workspaces }}.
+{{- else }}
+  !! The OWNER OF ANY WORKSPACE can read EVERY tenant's logs. Logs are cluster-wide. On a
+  !! multi-tenant install, set access.workspaces (e.g. --set 'access.workspaces={platform}').
+{{- end }}
+{{- if .Values.grafana.enabled }}
+
+!! THE GRAFANA VIEW IS A STRICTLY MORE POWERFUL SURFACE UNDER THE SAME RULE (ADR 0076).
+!! Anyone admitted can run ARBITRARY LogQL over EVERY admitted tenant's logs, not just the
+!! native viewer's scoped browse/filter/search. Who is admitted is exactly the rule above.
+!! To remove it: --set grafana.enabled=false
+
+Grafana verifies booth-core's signed X-Booth-Identity assertion against core's keys, fetched
+at pod start from:
+  {{ .Values.grafana.identity.issuerUrl }}
+This must equal booth-core's iframe-identity issuer EXACTLY (".svc.cluster.local:8080", not
+".svc:8080"). If it doesn't, the Grafana pod's fetch-jwks init container fails and says why:
+  kubectl -n {{ .Release.Namespace }} logs deploy/{{ include "booth-logging.grafanaName" . }} -c fetch-jwks
+If booth-core's iframe-identity key is ever regenerated (its booth-iframe-identity-keys Secret
+deleted), Grafana refuses everyone until restarted:
+  kubectl -n {{ .Release.Namespace }} rollout restart deploy/{{ include "booth-logging.grafanaName" . }}
+{{- end }}

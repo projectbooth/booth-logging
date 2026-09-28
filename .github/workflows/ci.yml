@@ -53,7 +53,8 @@ jobs:
 
       - name: Unit + contract tests
         env:
-          # A missing Loki or helm must fail the build, never silently skip green.
+          # A missing Loki, helm or docker (test/grafana runs a real Grafana) must fail the
+          # build, never silently skip green.
           BOOTH_TEST_STRICT: "1"
         run: |
           eval "$(sh hack/test-env.sh)"
@@ -120,6 +121,12 @@ jobs:
             --set loki.retentionDays=7 \
             --set loki.persistence.enabled=false \
             --set networkPolicy.enabled=false
+      - name: helm lint (Grafana view disabled)
+        run: |
+          helm lint charts/booth-logging \
+            --set oidc.issuerUrl=https://keycloak.example.com/realms/booth \
+            --set oidc.clientId=booth-logging \
+            --set grafana.enabled=false
 
   image-build:
     # Catches a broken Dockerfile on the PR that breaks it, not at release time. Not pushed.

@@ -1,8 +1,8 @@
 {{- if .Values.networkPolicy.enabled }}
 # Loki has no authentication of its own, so reachability is its access control: only the
-# collector (to push) and the viewer API (to query) may connect. Without this, any pod in
-# the cluster could read every tenant's logs, or forge lines, by going around the viewer's
-# owner check. (Kubelet probes come from the node and aren't affected on common CNIs.)
+# collector (to push), the viewer API and the Grafana view (to query) may connect. Without
+# this, any pod in the cluster could read every tenant's logs, or forge lines, by going around
+# the owner check. (Kubelet probes come from the node and aren't affected on common CNIs.)
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -23,7 +23,35 @@ spec:
         - podSelector:
             matchLabels:
               {{- include "booth-logging.selectorLabels" (dict "ctx" . "component" "api") | nindent 14 }}
+        {{- if .Values.grafana.enabled }}
+        - podSelector:
+            matchLabels:
+              {{- include "booth-logging.selectorLabels" (dict "ctx" . "component" "grafana") | nindent 14 }}
+        {{- end }}
       ports:
         - port: 3100
           protocol: TCP
+{{- if .Values.grafana.enabled }}
+---
+# Grafana verifies a signed assertion on every request, so this is defense in depth rather than
+# the boundary (ADR 0076): only booth-core's gateway has a reason to reach it.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "booth-logging.grafanaName" . }}
+  labels:
+    {{- include "booth-logging.labels" . | nindent 4 }}
+    app.kubernetes.io/component: grafana
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "booth-logging.selectorLabels" (dict "ctx" . "component" "grafana") | nindent 6 }}
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        {{- toYaml .Values.grafana.allowedClients | nindent 8 }}
+      ports:
+        - port: 3000
+          protocol: TCP
+{{- end }}
 {{- end }}

@@ -1,6 +1,10 @@
 # A real Loki for the Go tests' ingestion/query path (internal/loki, internal/api), the same
 # way booth-storage runs real MinIO/Azurite rather than mocking them. Used by CI (ci.yml) and
-# locally:  docker compose -f hack/docker-compose.loki.yml up -d --wait
+# locally:  docker compose -f hack/docker-compose.loki.yml up -d
+#
+# The fixed project name and the booth-logging-loki alias let test/grafana attach a real
+# Grafana to this network and reach Loki at the same URL the chart's data source uses in-cluster.
+name: booth-logging-test
 services:
   loki:
     image: grafana/loki:3.7.8
@@ -8,3 +12,6 @@ services:
     ports: ["3100:3100"]
     volumes:
       - ./loki-local.yaml:/etc/loki/config.yaml:ro
+    networks:
+      default:
+        aliases: [booth-logging-loki]

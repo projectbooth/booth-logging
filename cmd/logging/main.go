@@ -6,6 +6,7 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"log"
 	"log/slog"
@@ -18,6 +19,7 @@ import (
 	"github.com/projectbooth/booth-logging/internal/api"
 	"github.com/projectbooth/booth-logging/internal/auth"
 	"github.com/projectbooth/booth-logging/internal/config"
+	"github.com/projectbooth/booth-logging/internal/jwksfetch"
 	"github.com/projectbooth/booth-logging/internal/loki"
 )
 
@@ -28,6 +30,13 @@ func main() {
 	// detect this service's own levels. The standard logger (used by internal/auth) is
 	// routed through the same handler.
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
+	if len(os.Args) > 1 && os.Args[1] == "fetch-jwks" {
+		if err := fetchJWKS(os.Args[2:]); err != nil {
+			slog.Error("fetch-jwks failed", "error", err.Error())
+			os.Exit(1)
+		}
+		return
+	}
 	if err := run(); err != nil {
 		slog.Error("fatal", "error", err.Error())
 		os.Exit(1)
@@ -78,5 +87,36 @@ func run() error {
 	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return fmt.Errorf("http server: %w", err)
 	}
+	return nil
+}
+
+// fetchJWKS is the Grafana pod's init container (ADR 0076): it writes booth-core's
+// iframe-identity JWKS where Grafana's jwk_set_file reads it. See internal/jwksfetch for why.
+func fetchJWKS(args []string) error {
+	fs := flag.NewFlagSet("fetch-jwks", flag.ContinueOnError)
+	issuer := fs.String("issuer", "", "booth-core's iframe-identity issuer URL (exact)")
+	out := fs.String("out", "", "file to write the JWKS to")
+	wait := fs.Duration("wait", 5*time.Minute, "how long to keep retrying while core is unreachable")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *issuer == "" || *out == "" {
+		return errors.New("-issuer and -out are required")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), *wait)
+	defer cancel()
+	keys, err := jwksfetch.FetchWithRetry(ctx, &http.Client{Timeout: 10 * time.Second}, *issuer, 3*time.Second,
+		func(f string, a ...any) { slog.Warn(fmt.Sprintf(f, a...)) })
+	if err != nil {
+		return err
+	}
+	tmp := *out + ".tmp"
+	if err := os.WriteFile(tmp, keys, 0o644); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, *out); err != nil {
+		return err
+	}
+	slog.Info("wrote booth-core's iframe-identity keys for Grafana", "issuer", *issuer, "out", *out)
 	return nil
 }

@@ -332,3 +332,167 @@ func TestChart_AccessAndAuthEnv(t *testing.T) {
 		t.Errorf("rendering without OIDC settings should fail loudly: %s", out)
 	}
 }
+
+// ---- the Grafana view (ADR 0076) -------------------------------------------------------------
+
+func renderGrafanaModule(t *testing.T, extra ...string) (boothModule, bool) {
+	t.Helper()
+	for _, d := range docs(t, helmTemplate(t, "", extra...)) {
+		if d["kind"] != "BoothModule" {
+			continue
+		}
+		if spec, _ := d["spec"].(map[string]any); spec["id"] == "logging-grafana" {
+			raw, _ := yaml.Marshal(d)
+			var m boothModule
+			if err := yaml.Unmarshal(raw, &m); err != nil {
+				t.Fatal(err)
+			}
+			return m, true
+		}
+	}
+	return boothModule{}, false
+}
+
+// A second registration from this chart (module-manifest.md's multi-surface pattern), beside
+// the unchanged `logging` one.
+func TestGrafana_SecondRegistration(t *testing.T) {
+	m, ok := renderGrafanaModule(t)
+	if !ok {
+		t.Fatal("no logging-grafana BoothModule rendered")
+	}
+	if m.Spec.UIIntegrationMode != "iframe-proxy" || m.Spec.NavGroup != "manage" || m.Spec.NavPath != "/logging-grafana" || !m.Spec.HasOwnUI {
+		t.Errorf("spec = %+v", m.Spec)
+	}
+	if m.Spec.ServiceRef.Name != "booth-logging-grafana" || m.Spec.ServiceRef.Port != 3000 {
+		t.Errorf("serviceRef = %+v, want the Grafana Service", m.Spec.ServiceRef)
+	}
+	if !semver.MatchString(m.Spec.Version) || !semver.MatchString(m.Spec.ContractVersion) || m.Spec.DisplayName == "" {
+		t.Errorf("required fields: %+v", m.Spec)
+	}
+	if m.Spec.Events != nil || m.Spec.Database != nil || m.Spec.WorkloadIdentity != nil {
+		t.Error("the Grafana registration declares capabilities it doesn't use")
+	}
+	dep := helmTemplate(t, "templates/grafana.yaml")
+	if !regexp.MustCompile(`readinessProbe:\s+httpGet:\s+path: ` + regexp.QuoteMeta(m.Spec.HealthCheckPath) + `\b`).Match(dep) {
+		t.Errorf("Grafana readinessProbe doesn't use healthCheckPath %q", m.Spec.HealthCheckPath)
+	}
+	// The native viewer's registration is untouched.
+	if n := renderBoothModule(t); n.Spec.ID != "logging" || n.Spec.UIIntegrationMode != "native" {
+		t.Errorf("native registration changed: %+v", n.Spec)
+	}
+}
+
+func grafanaINI(t *testing.T, extra ...string) string {
+	t.Helper()
+	var cm struct {
+		Data map[string]string `yaml:"data"`
+	}
+	if err := yaml.Unmarshal(helmTemplate(t, "templates/grafana-config.yaml", extra...), &cm); err != nil {
+		t.Fatal(err)
+	}
+	return cm.Data["grafana.ini"]
+}
+
+// Every way into Grafana other than core's signed assertion is off, and the gate is strict.
+// test/grafana proves these settings behave as intended in a real Grafana; this pins them.
+func TestGrafana_Hardening(t *testing.T) {
+	ini := grafanaINI(t)
+	for _, want := range []string{
+		"disable_initial_admin_creation = true",
+		"disable_login_form = true",
+		"[auth.basic]\nenabled = false",
+		"[auth.anonymous]\nenabled = false",
+		"header_name = X-Booth-Identity",
+		`"aud": ["logging-grafana"]`,
+		"role_attribute_strict = true",
+		"skip_org_role_sync = false",
+		"allow_assign_grafana_admin = false",
+		"allow_embedding = true",
+		"root_url = %(protocol)s://%(domain)s/iframe/logging-grafana/",
+		"serve_from_sub_path = false",
+	} {
+		if !strings.Contains(ini, want) {
+			t.Errorf("grafana.ini missing %q", want)
+		}
+	}
+	if regexp.MustCompile(`(?m)^jwk_set_url\s*=`).MatchString(ini) {
+		t.Error("jwk_set_url set: Grafana refuses a non-https JWKS URL, core's issuer is http (see internal/jwksfetch)")
+	}
+}
+
+// The init container fetches keys for exactly the issuer Grafana expects in `iss`, and the
+// data source points at this release's Loki, read-only.
+func TestGrafana_IssuerAndDataSourceWiring(t *testing.T) {
+	const iss = "http://core.example.svc.cluster.local:8080/iframe-identity"
+	ini := grafanaINI(t, "--set", "grafana.identity.issuerUrl="+iss+"/")
+	if !strings.Contains(ini, `"iss": "`+iss+`"`) {
+		t.Errorf("expect_claims iss not %q (trailing slash must be trimmed):\n%s", iss, ini)
+	}
+	dep := string(helmTemplate(t, "templates/grafana.yaml", "--set", "grafana.identity.issuerUrl="+iss+"/"))
+	if !strings.Contains(dep, "- -issuer="+iss+"\n") || !strings.Contains(dep, "- fetch-jwks") {
+		t.Errorf("init container not fetching keys for %q:\n%s", iss, dep)
+	}
+	var cm struct {
+		Data map[string]string `yaml:"data"`
+	}
+	_ = yaml.Unmarshal(helmTemplate(t, "templates/grafana-config.yaml"), &cm)
+	ds := cm.Data["datasources.yaml"]
+	if !strings.Contains(ds, "url: http://booth-logging-loki:3100") || !strings.Contains(ds, "editable: false") {
+		t.Errorf("datasources.yaml:\n%s", ds)
+	}
+}
+
+func TestGrafana_Validation(t *testing.T) {
+	needHelm(t)
+	for _, tc := range []struct{ set, want string }{
+		{"grafana.admittedRole=Admin", "grafana.admittedRole must be Viewer or Editor"},
+		{"access.workspaces={Platform_1}", "access.workspaces entries must be workspace slugs"},
+		{"access.workspaces={a'b}", "access.workspaces entries must be workspace slugs"},
+		{"grafana.identity.issuerUrl=", "grafana.identity.issuerUrl is required"},
+	} {
+		args := append([]string{"template", "x", chartDir, "--set", tc.set}, requiredValues...)
+		out, err := exec.Command("helm", args...).CombinedOutput()
+		if err == nil || !bytes.Contains(out, []byte(tc.want)) {
+			t.Errorf("%s: want failure %q, got: %s", tc.set, tc.want, out)
+		}
+	}
+}
+
+// Loki admits Grafana; Grafana admits only core's gateway (defense in depth, ADR 0076).
+func TestGrafana_NetworkPolicies(t *testing.T) {
+	var loki, graf map[string]any
+	for _, d := range docs(t, helmTemplate(t, "templates/networkpolicy.yaml")) {
+		switch d["metadata"].(map[string]any)["name"] {
+		case "booth-logging-loki":
+			loki = d
+		case "booth-logging-grafana":
+			graf = d
+		}
+	}
+	if loki == nil || graf == nil {
+		t.Fatal("want both NetworkPolicies")
+	}
+	lk, _ := yaml.Marshal(loki)
+	if !strings.Contains(string(lk), "app.kubernetes.io/component: grafana") {
+		t.Errorf("Loki's NetworkPolicy doesn't admit Grafana:\n%s", lk)
+	}
+	gf, _ := yaml.Marshal(graf)
+	for _, want := range []string{"app.kubernetes.io/name: booth-core", "port: 3000", "app.kubernetes.io/component: grafana"} {
+		if !strings.Contains(string(gf), want) {
+			t.Errorf("Grafana NetworkPolicy missing %q:\n%s", want, gf)
+		}
+	}
+}
+
+func TestGrafana_Disabled(t *testing.T) {
+	off := []string{"--set", "grafana.enabled=false"}
+	if _, ok := renderGrafanaModule(t, off...); ok {
+		t.Error("logging-grafana registered with grafana.enabled=false")
+	}
+	all := string(helmTemplate(t, "", off...))
+	for _, gone := range []string{"booth-logging-grafana", "app.kubernetes.io/component: grafana"} {
+		if strings.Contains(all, gone) {
+			t.Errorf("%q still rendered with grafana.enabled=false", gone)
+		}
+	}
+}

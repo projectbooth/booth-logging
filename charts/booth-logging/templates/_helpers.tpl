@@ -66,3 +66,47 @@ be truncated without anyone noticing.
 {{- end -}}
 {{- mul (atoi $s) 24 -}}
 {{- end -}}
+
+{{/*
+access.workspaces, validated: every entry must be an ADR 0025 workspace slug. The list feeds both
+the API's allowlist and the Grafana admission expression below, where an unvalidated value would
+be spliced into a JMESPath string literal.
+*/}}
+{{- define "booth-logging.accessWorkspaces" -}}
+{{- range .Values.access.workspaces -}}
+{{- if not (regexMatch "^[a-z0-9-]+$" (toString .)) -}}
+{{- fail (printf "access.workspaces entries must be workspace slugs matching ^[a-z0-9-]+$ (got %q)" (toString .)) -}}
+{{- end -}}
+{{- end -}}
+{{- join "," .Values.access.workspaces -}}
+{{- end -}}
+
+{{- define "booth-logging.grafanaName" -}}
+{{- printf "%s-grafana" (include "booth-logging.fullname" .) | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+
+{{/*
+The Grafana view's admission gate (ADR 0067 via ADR 0076), as a JMESPath expression for
+[auth.jwt] role_attribute_path. It evaluates to the one role every admitted person gets
+(grafana.admittedRole) or to '' — and with role_attribute_strict = true, '' refuses the login
+outright. There is no third outcome: nobody is admitted at a lower Grafana role.
+
+The claims are core's X-Booth-Identity assertion (ADR 0069), whose groups claim carries exactly
+one entry, the ACTIVE workspace's "/workspaces/<ws>/<role>" (ADR 0025). So:
+  - no allowlist: admitted iff that entry ends in /owner;
+  - allowlist:    admitted iff that entry is "/workspaces/<allowed>/owner" for some allowed slug.
+An absent or malformed groups claim is treated as [] (refused), never an evaluation error.
+*/}}
+{{- define "booth-logging.grafanaRoleAttributePath" -}}
+{{- $groups := printf "(\"%s\" || `[]`)" .Values.oidc.groupsClaim -}}
+{{- $role := .Values.grafana.admittedRole -}}
+{{- if .Values.access.workspaces -}}
+{{- $checks := list -}}
+{{- range (splitList "," (include "booth-logging.accessWorkspaces" .)) -}}
+{{- $checks = append $checks (printf "contains(%s, '/workspaces/%s/owner')" $groups .) -}}
+{{- end -}}
+{{- printf "(%s) && '%s' || ''" (join " || " $checks) $role -}}
+{{- else -}}
+{{- printf "length(%s[?starts_with(@, '/workspaces/') && ends_with(@, '/owner')]) > `0` && '%s' || ''" $groups $role -}}
+{{- end -}}
+{{- end -}}

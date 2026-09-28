@@ -2,10 +2,10 @@ name: Integration
 
 # Layer 3 (contracts/testing-strategy.md, ADR 0024): the chart deployed to a real kind
 # cluster, then test/integration/verify.sh — the collector really tails pods, Loki really
-# stores and labels what it ships, the NetworkPolicy really closes Loki. Runs on merge to
-# main and nightly. The same script was run by hand against a local kind cluster while this
-# module was built (see test/integration/README.md); this workflow file itself has not yet
-# run on GitHub.
+# stores and labels what it ships, the NetworkPolicies really close Loki and Grafana, and the
+# Grafana view (ADR 0076) fetches its keys and admits only owners. No real booth-core runs
+# here, so a stub of core's iframe-identity issuer (test/integration/stubcore) supplies the keys
+# and signed assertions. Runs on merge to main and nightly.
 on:
   push:
     branches: [main]
@@ -22,6 +22,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: actions/setup-go@v5 # test/integration/stubcore
+        with:
+          go-version-file: go.mod
+
       - uses: helm/kind-action@v1
         with:
           cluster_name: booth-logging-ci
@@ -36,9 +40,17 @@ jobs:
       - name: Install vendored BoothModule CRD (test/integration/fixtures)
         run: kubectl apply -f test/integration/fixtures/boothmodule-crd.yaml
 
-      - name: Install the chart
+      - name: Stand in for booth-core's iframe-identity issuer (ADR 0069)
+        id: stubcore
         run: |
           kubectl create namespace booth-logging
+          issuer=$(test/integration/deploy-stub-core.sh booth-logging "$RUNNER_TEMP/grafana-tokens")
+          echo "issuer=$issuer" >> "$GITHUB_OUTPUT"
+
+      - name: Install the chart
+        env:
+          ISSUER: ${{ steps.stubcore.outputs.issuer }}
+        run: |
           # A real, publicly reachable OIDC discovery document, only so the API's startup
           # discovery succeeds; no login happens here (see test/integration/README.md).
           helm install booth-logging charts/booth-logging \
@@ -49,9 +61,12 @@ jobs:
             --set oidc.issuerUrl=https://accounts.google.com \
             --set oidc.clientId=booth-logging-ci \
             --set oidc.requireAudience=false \
+            --set grafana.identity.issuerUrl="$ISSUER" \
             --wait --timeout 6m
 
       - name: Verify
+        env:
+          GRAFANA_TOKENS: ${{ runner.temp }}/grafana-tokens
         run: test/integration/verify.sh
 
       - name: Dump state on failure
@@ -62,3 +77,4 @@ jobs:
           kubectl -n booth-logging logs daemonset/booth-logging-collector --tail=100 || true
           kubectl -n booth-logging logs statefulset/booth-logging-loki --tail=100 || true
           kubectl -n booth-logging logs deployment/booth-logging --tail=100 || true
+          kubectl -n booth-logging logs deployment/booth-logging-grafana --all-containers --tail=100 || true

@@ -124,6 +124,72 @@ collector:
     seccompProfile:
       type: RuntimeDefault
 
+# The Grafana power-user view (ADR 0076): full Grafana with arbitrary LogQL over Loki, registered
+# as a second module, `logging-grafana` (uiIntegrationMode: iframe-proxy), next to the native
+# viewer.
+#
+# !! It is strictly MORE powerful than the native viewer under the SAME access rule (ADR 0067):
+# !! anyone admitted can run any query over every tenant's logs. With access.workspaces empty
+# !! (the default) that means the owner of ANY workspace. Set access.workspaces on a
+# !! multi-tenant install, or set grafana.enabled=false.
+#
+# Authentication is Grafana's own JWT auth over the X-Booth-Identity assertion booth-core signs
+# on every iframe-proxied request (ADR 0069), verified against core's JWKS: no Grafana login,
+# no admin account, no anonymous access. Admission is a binary gate derived from the same
+# access.workspaces and oidc.groupsClaim values as the native viewer: an owner of the active
+# workspace (and, when access.workspaces is set, of one of those workspaces) is admitted as
+# admittedRole; everyone else is refused outright.
+grafana:
+  enabled: true
+
+  image:
+    repository: grafana/grafana
+    tag: "13.2.2"
+    pullPolicy: IfNotPresent
+
+  identity:
+    # booth-core's iframe-identity issuer (ADR 0069). It must equal core's
+    # BOOTH_IFRAME_IDENTITY_ISSUER_URL EXACTLY — it is compared character-for-character with
+    # the assertion's `iss`. Core's chart spells its default with ".svc.cluster.local:8080"
+    # (not the shorter ".svc:8080" other booth URLs use); copying the wrong spelling refuses
+    # every login. The default below matches core installed as release "booth-core" in
+    # namespace "booth-system" (booth-notebooks uses the same default).
+    issuerUrl: "http://booth-core.booth-system.svc.cluster.local:8080/iframe-identity"
+
+  # The one Grafana role every admitted person gets. Editor, because Grafana's Explore (the
+  # ad-hoc LogQL surface this view exists for) needs it. It can't manage data sources, users or
+  # settings; the Loki data source is provisioned read-only. Admin is not allowed here.
+  admittedRole: Editor
+
+  # Grafana's own state (its user rows, any dashboards someone saves) lives on an emptyDir and
+  # is lost when the pod restarts. Nothing is lost that matters for access: users are recreated
+  # from the next signed assertion, and the data source is provisioned from this chart.
+  resources: {}
+
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 472 # the grafana image's own user
+    runAsGroup: 0
+    fsGroup: 472
+    seccompProfile:
+      type: RuntimeDefault
+
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: ["ALL"]
+
+  # Defense in depth (ADR 0076): the signature check is the real boundary — a forged
+  # X-Booth-Identity would need core's private key — but only booth-core's gateway has any
+  # reason to reach Grafana, so the NetworkPolicy admits just its pods (plus the kubelet's
+  # probes, which come from the node). Adjust if core's pods are labelled differently.
+  allowedClients:
+    - namespaceSelector: {}
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/name: booth-core
+
 # Loki runs without authentication (it knows nothing about Booth identities). This policy
 # lets only the collector and the viewer API reach it, so nothing else in the cluster can
 # read every tenant's logs — or write forged ones — by going around the viewer. Needs a CNI

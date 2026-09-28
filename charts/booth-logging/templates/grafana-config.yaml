@@ -1,0 +1,108 @@
+{{- if .Values.grafana.enabled }}
+{{- if not (has .Values.grafana.admittedRole (list "Viewer" "Editor")) }}
+{{- fail (printf "grafana.admittedRole must be Viewer or Editor (got %q); Admin would let log readers reconfigure Grafana's data sources" .Values.grafana.admittedRole) }}
+{{- end }}
+{{- $issuer := required "grafana.identity.issuerUrl is required when grafana.enabled" .Values.grafana.identity.issuerUrl | trimSuffix "/" }}
+# The Grafana view's configuration (ADR 0076). Everything that decides who gets in is here;
+# test/grafana runs a real Grafana against exactly this rendered file.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "booth-logging.grafanaName" . }}
+  labels:
+    {{- include "booth-logging.labels" . | nindent 4 }}
+    app.kubernetes.io/component: grafana
+data:
+  grafana.ini: |
+    [server]
+    http_port = 3000
+    ; Reached only as /iframe/logging-grafana/... through the shell and booth-core's iframe proxy,
+    ; which strips that prefix before forwarding — so Grafana generates links under it
+    ; (root_url) but serves from / (serve_from_sub_path = false). Keeping every request under
+    ; the prefix also keeps Grafana's own /api/... calls away from booth-core's /api/.
+    root_url = %(protocol)s://%(domain)s/iframe/logging-grafana/
+    serve_from_sub_path = false
+
+    [paths]
+    data = /var/lib/grafana
+    plugins = /var/lib/grafana/plugins
+    provisioning = /etc/grafana/provisioning
+
+    [security]
+    ; No built-in admin account at all: nothing to guess, leak or forget to rotate.
+    disable_initial_admin_creation = true
+    ; Rendered inside the shell's iframe (ADR 0005).
+    allow_embedding = true
+    disable_gravatar = true
+
+    [auth]
+    ; The signed assertion is the only way in: no login form, no sign-out (it would only
+    ; bounce straight back in on the next request).
+    disable_login_form = true
+    disable_signout_menu = true
+
+    [auth.basic]
+    enabled = false
+
+    [auth.anonymous]
+    enabled = false
+
+    [auth.jwt]
+    ; ADR 0076 / ADR 0069: booth-core signs X-Booth-Identity (RS256, exp <= 2 min) on every
+    ; iframe-proxied request, after stripping any client-supplied copy. Grafana verifies the
+    ; signature against core's keys, and the issuer and audience below.
+    ;
+    ; The keys are a file, not jwk_set_url: Grafana only fetches a JWKS over https, and core
+    ; serves this issuer on plain in-cluster http. The pod's init container (booth-logging
+    ; fetch-jwks) writes core's current JWKS here, after checking core's discovery document
+    ; names exactly {{ $issuer }} as its issuer.
+    enabled = true
+    header_name = X-Booth-Identity
+    jwk_set_file = /var/lib/booth-jwks/jwks.json
+    expect_claims = {"iss": {{ $issuer | quote }}, "aud": ["logging-grafana"]}
+    username_claim = sub
+    auto_sign_up = true
+    ; The admission gate (ADR 0067): resolves to {{ .Values.grafana.admittedRole }} or to ''. With
+    ; role_attribute_strict, '' refuses the login outright rather than falling back to a
+    ; default role. Role sync runs on every request, so losing ownership locks a user out at once.
+    role_attribute_path = {{ include "booth-logging.grafanaRoleAttributePath" . }}
+    role_attribute_strict = true
+    skip_org_role_sync = false
+    allow_assign_grafana_admin = false
+
+    [users]
+    allow_sign_up = false
+    allow_org_create = false
+
+    [analytics]
+    reporting_enabled = false
+    check_for_updates = false
+    check_for_plugin_updates = false
+    feedback_links_enabled = false
+
+    [news]
+    news_feed_enabled = false
+
+    [live]
+    ; Nothing here uses streaming; one less websocket path through the iframe proxy.
+    max_connections = 0
+
+    [log]
+    mode = console
+
+    [log.console]
+    format = json
+
+  datasources.yaml: |
+    apiVersion: 1
+    datasources:
+      - name: Loki
+        uid: booth-loki
+        type: loki
+        access: proxy
+        url: {{ include "booth-logging.lokiURL" . }}
+        isDefault: true
+        editable: false
+        jsonData:
+          maxLines: 1000
+{{- end }}
