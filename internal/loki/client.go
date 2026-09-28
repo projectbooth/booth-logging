@@ -126,9 +126,6 @@ func decodeValue(stream map[string]string, v []json.RawMessage) (Entry, error) {
 		return Entry{}, fmt.Errorf("loki: malformed line: %w", err)
 	}
 	labels := make(map[string]string, len(stream)+1)
-	for k, val := range stream {
-		labels[k] = val
-	}
 	if len(v) > 2 {
 		// Loki's "categorized labels" form nests metadata; the flat form is a plain map.
 		// Either way, anything that isn't a string-to-string map is ignored rather than
@@ -153,14 +150,24 @@ func decodeValue(stream map[string]string, v []json.RawMessage) (Entry, error) {
 			}
 		}
 	}
+	// Stream labels go in last, so metadata derived from a line can add keys (detected_level)
+	// but never overwrite what the stream was ingested with: module, workspace (ADR 0077) and
+	// the rest come from pod metadata, not from anything the pod logged.
+	for k, val := range stream {
+		labels[k] = val
+	}
 	return Entry{Timestamp: ts, Line: line, Labels: labels}, nil
 }
 
-// LabelValues returns the values of label seen between start and end, sorted.
-func (c *Client) LabelValues(ctx context.Context, label string, start, end time.Time) ([]string, error) {
+// LabelValues returns the values of label seen between start and end, sorted. A non-empty
+// selector (a LogQL stream selector) restricts it to the streams that match.
+func (c *Client) LabelValues(ctx context.Context, label string, start, end time.Time, selector string) ([]string, error) {
 	q := url.Values{}
 	q.Set("start", strconv.FormatInt(start.UnixNano(), 10))
 	q.Set("end", strconv.FormatInt(end.UnixNano(), 10))
+	if selector != "" {
+		q.Set("query", selector)
+	}
 	var body struct {
 		Data []string `json:"data"`
 	}

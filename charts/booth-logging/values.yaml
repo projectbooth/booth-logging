@@ -29,14 +29,19 @@ oidc:
   # Optional: booth-core's issuer URL, to also accept its workload tokens (ADR 0056).
   workloadIssuerUrl: ""
 
-# Who may read logs. Logs are cluster-wide — every module's output, mentioning every
-# workspace — so access is NOT scoped by workspace. Only workspace owners are ever allowed.
+# Who may read which logs (ADR 0067 as amended by ADR 0077). Only workspace owners ever read
+# logs; editors and viewers read nothing.
 #
-# workspaces: [] (the default) lets the owner of ANY workspace read ALL logs. That is only
-# right when every workspace owner is trusted operator staff (e.g. a single-tenant install);
-# the service logs a warning at startup while it's left open. List one or more workspaces
-# (typically a dedicated "platform"/"ops" workspace) to restrict reading to their owners.
-# See docs/decisions/0002-log-access-policy.md.
+# workspaces lists the OPERATOR workspaces. An owner acting in one of them is an operator and
+# reads everything: every module's and every pod's logs, platform-wide. Any other owner reads
+# only the logs of pods labelled booth.projectbooth.io/workspace=<their active workspace>
+# (their workspace's own pods, e.g. its notebook servers). That pin is applied server-side, and
+# the label comes from pod metadata, never log content. Shared module pods (core, storage,
+# catalog, ...) carry no workspace label and are invisible to them.
+#
+# workspaces: [] (the default) means no operators: every owner is scoped to their own workspace,
+# nobody can read shared platform logs, and the Grafana view isn't deployed. Typically list one
+# dedicated workspace, e.g. [platform]. See docs/decisions/0002 and 0008.
 access:
   workspaces: []
 
@@ -128,17 +133,15 @@ collector:
 # as a second module, `logging-grafana` (uiIntegrationMode: iframe-proxy), next to the native
 # viewer.
 #
-# !! It is strictly MORE powerful than the native viewer under the SAME access rule (ADR 0067):
-# !! anyone admitted can run any query over every tenant's logs. With access.workspaces empty
-# !! (the default) that means the owner of ANY workspace. Set access.workspaces on a
-# !! multi-tenant install, or set grafana.enabled=false.
+# !! OPERATORS ONLY (ADR 0077). Grafana runs arbitrary LogQL over every tenant's logs, which
+# !! can't be pinned to one workspace, so only owners acting in an access.workspaces workspace
+# !! are admitted. Every other owner is refused outright, not admitted at a lower role. With
+# !! access.workspaces empty there are no operators, so none of this is deployed at all:
+# !! no Grafana, no nav entry.
 #
 # Authentication is Grafana's own JWT auth over the X-Booth-Identity assertion booth-core signs
-# on every iframe-proxied request (ADR 0069), verified against core's JWKS: no Grafana login,
-# no admin account, no anonymous access. Admission is a binary gate derived from the same
-# access.workspaces and oidc.groupsClaim values as the native viewer: an owner of the active
-# workspace (and, when access.workspaces is set, of one of those workspaces) is admitted as
-# admittedRole; everyone else is refused outright.
+# on every iframe-proxied request (ADR 0069), verified against core's keys: no Grafana login,
+# no admin account, no anonymous access. An admitted operator gets admittedRole.
 grafana:
   enabled: true
 

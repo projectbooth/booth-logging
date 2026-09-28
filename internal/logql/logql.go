@@ -23,6 +23,10 @@ const (
 	LabelPod       = "pod"
 	LabelContainer = "container"
 	LabelStream    = "stream"
+	// LabelWorkspace is copied by the collector from the pod's booth.projectbooth.io/workspace
+	// label (ADR 0077) — Kubernetes metadata set by the platform process that created the pod,
+	// never anything the pod logged. Shared module pods don't have it.
+	LabelWorkspace = "workspace"
 
 	// DetectedLevel is structured metadata Loki itself derives from each line at ingest
 	// (limits_config.discover_log_levels): a JSON/logfmt `level` field, or a keyword in a
@@ -84,6 +88,9 @@ func BucketOf(detected string) Level {
 // regexp-escaped and quoted below; this is a second, independent guard.
 var moduleRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$`)
 
+// workspaceRE is ADR 0025's workspace slug.
+var workspaceRE = regexp.MustCompile(`^[a-z0-9-]+$`)
+
 // MaxSearchLength caps the free-text search, keeping Loki's line filter cheap.
 const MaxSearchLength = 500
 
@@ -95,6 +102,10 @@ type Filter struct {
 	Levels []Level
 	// Search is a case-insensitive substring every returned line must contain.
 	Search string
+	// Workspace, when set, pins the query to streams whose workspace label equals it
+	// (ADR 0077): a non-operator owner's queries always carry their active workspace here, set
+	// by the server from the verified identity, never from the request.
+	Workspace string
 }
 
 // Validate reports the first problem with f, if any.
@@ -103,6 +114,9 @@ func (f Filter) Validate() error {
 		if !moduleRE.MatchString(m) {
 			return fmt.Errorf("invalid module %q", m)
 		}
+	}
+	if f.Workspace != "" && !workspaceRE.MatchString(f.Workspace) {
+		return fmt.Errorf("invalid workspace %q", f.Workspace)
 	}
 	for _, l := range f.Levels {
 		if _, ok := detectedByLevel[l]; !ok {
@@ -120,7 +134,12 @@ func (f Filter) Validate() error {
 
 // Query builds the LogQL for f. Call Validate first; Query assumes a valid filter.
 //
-// Shape: {module=~"a|b"} |~ "(?i)<escaped search>" | detected_level=~"error|critical|fatal"
+// Shape: {module=~"a|b", workspace="ws"} |~ "(?i)<escaped search>" | detected_level=~"error|critical|fatal"
+//
+// The workspace pin is a stream-selector matcher, not a pipeline filter: a stream selector
+// matches only the labels a stream was ingested with (set by the collector from pod metadata),
+// whereas a `| workspace=...` pipeline filter would also match labels parsed out of line
+// content or structured metadata.
 //
 // Loki requires at least one matcher that can't match the empty string, so "every
 // module" is module=~".+" — which also, deliberately, leaves out any stream the collector
@@ -134,6 +153,9 @@ func (f Filter) Query() string {
 		b.WriteString(strconv.Quote(".+"))
 	} else {
 		b.WriteString(strconv.Quote(alternation(f.Modules)))
+	}
+	if f.Workspace != "" {
+		b.WriteString(", " + LabelWorkspace + "=" + strconv.Quote(f.Workspace))
 	}
 	b.WriteString("}")
 

@@ -2,22 +2,24 @@ booth-logging {{ .Chart.AppVersion }} is installed in namespace {{ .Release.Name
 
 Every pod's stdout/stderr is collected into Loki (retention: {{ .Values.loki.retentionDays }} days).
 Native viewer: nav entry "Logs" (module id: logging).
-{{- if .Values.grafana.enabled }}
+{{- if include "booth-logging.grafanaActive" . }}
 Grafana view:  nav entry "Logs (Grafana)" (module id: logging-grafana).
 {{- end }}
 
-WHO CAN READ LOGS (ADR 0067)
+WHO CAN READ WHICH LOGS (ADR 0067, as amended by ADR 0077)
 {{- if .Values.access.workspaces }}
-  Only OWNERS acting in these workspaces: {{ join ", " .Values.access.workspaces }}.
+  Operators (owners acting in: {{ join ", " .Values.access.workspaces }}) read ALL logs, platform-wide.
 {{- else }}
-  !! The OWNER OF ANY WORKSPACE can read EVERY tenant's logs. Logs are cluster-wide. On a
-  !! multi-tenant install, set access.workspaces (e.g. --set 'access.workspaces={platform}').
+  No operator workspaces are configured, so nobody can read shared platform logs (core,
+  storage, catalog, ...). To name operators: --set 'access.workspaces={platform}'
 {{- end }}
-{{- if .Values.grafana.enabled }}
+  Workspace owners who are not operators read only their own workspace's pods: those labelled
+  booth.projectbooth.io/workspace=<workspace> (e.g. notebook servers). Editors and viewers
+  read nothing.
+{{- if include "booth-logging.grafanaActive" . }}
 
-!! THE GRAFANA VIEW IS A STRICTLY MORE POWERFUL SURFACE UNDER THE SAME RULE (ADR 0076).
-!! Anyone admitted can run ARBITRARY LogQL over EVERY admitted tenant's logs, not just the
-!! native viewer's scoped browse/filter/search. Who is admitted is exactly the rule above.
+!! THE GRAFANA VIEW RUNS ARBITRARY LogQL OVER EVERY TENANT'S LOGS. It admits OPERATORS ONLY
+!! (owners acting in {{ join ", " .Values.access.workspaces }}); every other owner is refused outright.
 !! To remove it: --set grafana.enabled=false
 
 Grafana verifies booth-core's signed X-Booth-Identity assertion against core's keys, fetched
@@ -29,4 +31,8 @@ This must equal booth-core's iframe-identity issuer EXACTLY (".svc.cluster.local
 If booth-core's iframe-identity key is ever regenerated (its booth-iframe-identity-keys Secret
 deleted), Grafana refuses everyone until restarted:
   kubectl -n {{ .Release.Namespace }} rollout restart deploy/{{ include "booth-logging.grafanaName" . }}
+{{- else if .Values.grafana.enabled }}
+
+The Grafana view is enabled but NOT deployed: it admits operators only (ADR 0077), and none
+are configured. Set access.workspaces to deploy it.
 {{- end }}

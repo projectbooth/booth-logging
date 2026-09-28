@@ -2,10 +2,12 @@ package api
 
 import (
 	"net/url"
+	"slices"
 	"strconv"
 	"testing"
 	"time"
 
+	"github.com/projectbooth/booth-logging/internal/auth"
 	"github.com/projectbooth/booth-logging/internal/loki"
 	"github.com/projectbooth/booth-logging/internal/loki/lokitest"
 )
@@ -28,7 +30,7 @@ func TestRealLoki_ViewerQueryPath(t *testing.T) {
 	)
 	lokitest.Push(t, lokiURL, map[string]string{"module": other}, lokitest.Line{At: at(2), Text: `{"level":"error","msg":"database down elsewhere"}`})
 
-	h := NewRouter(Deps{Verifier: tokens, Loki: loki.New(lokiURL, nil), Retention: 14 * 24 * time.Hour})
+	h := NewRouter(Deps{Verifier: tokens, Loki: loki.New(lokiURL, nil), Access: operators, Retention: 14 * 24 * time.Hour})
 	query := func(v url.Values) LogsResponse {
 		t.Helper()
 		v.Set("start", strconv.FormatInt(now.Add(-2*time.Minute).UnixNano(), 10))
@@ -114,4 +116,58 @@ func TestRealLoki_ViewerQueryPath(t *testing.T) {
 			t.Errorf("modules = %q", m["modules"])
 		}
 	})
+}
+
+// ADR 0077 against a real Loki: a non-operator owner sees only streams the collector labeled
+// with their workspace. Lines that merely *say* a workspace — in JSON, logfmt, or text — from
+// a stream without the label are invisible to them, and so are other workspaces' streams.
+func TestRealLoki_WorkspaceScoping(t *testing.T) {
+	lokiURL := lokitest.URL(t)
+	mod := lokitest.UniqueModule(t)
+	ws := "ws-" + mod[3:] // this test's own workspace, so parallel runs never overlap
+	other := "other-" + mod[3:]
+	now := time.Now()
+
+	lokitest.Push(t, lokiURL, map[string]string{"module": mod, "workspace": ws}, lokitest.Line{At: now.Add(-3 * time.Second), Text: "mine"})
+	lokitest.Push(t, lokiURL, map[string]string{"module": mod, "workspace": other}, lokitest.Line{At: now.Add(-2 * time.Second), Text: "another tenant's"})
+	lokitest.Push(t, lokiURL, map[string]string{"module": mod}, // a shared pod: no workspace label
+		lokitest.Line{At: now.Add(-1 * time.Second), Text: `{"level":"info","workspace":"` + ws + `","msg":"claims to be yours"}`},
+		lokitest.Line{At: now.Add(-1 * time.Second), Text: `workspace=` + ws + ` msg="also claims"`},
+	)
+
+	tokens["owner-scoped"] = &auth.Claims{Subject: "erin", Groups: []string{"/workspaces/" + ws + "/owner"}}
+	tokens["owner-ops"] = &auth.Claims{Subject: "ops", Groups: []string{"/workspaces/ops/owner"}}
+	t.Cleanup(func() { delete(tokens, "owner-scoped"); delete(tokens, "owner-ops") })
+	h := NewRouter(Deps{Verifier: tokens, Loki: loki.New(lokiURL, nil), Access: AccessPolicy{Workspaces: []string{"ops"}}, Retention: 14 * 24 * time.Hour})
+
+	query := func(token, workspace string, extra url.Values) LogsResponse {
+		t.Helper()
+		v := url.Values{"module": {mod}, "start": {strconv.FormatInt(now.Add(-time.Minute).UnixNano(), 10)}, "end": {strconv.FormatInt(now.UnixNano(), 10)}}
+		for k, vs := range extra {
+			v[k] = vs
+		}
+		rec := do(t, h, token, workspace, "/api/logs?"+v.Encode())
+		if rec.Code != 200 {
+			t.Fatalf("%d %s", rec.Code, rec.Body)
+		}
+		return decode[LogsResponse](t, rec)
+	}
+	lokitest.Eventually(t, 15*time.Second, func() bool { return len(query("owner-ops", "ops", nil).Entries) == 4 })
+
+	r := query("owner-scoped", ws, nil)
+	if len(r.Entries) != 1 || r.Entries[0].Line != "mine" || r.Entries[0].Workspace != ws {
+		t.Errorf("scoped owner saw %+v; want only their own labeled line", r.Entries)
+	}
+	// Searching for the other lines' text doesn't reach them either.
+	if r := query("owner-scoped", ws, url.Values{"q": {"claims"}}); len(r.Entries) != 0 {
+		t.Errorf("search reached unlabeled lines: %+v", r.Entries)
+	}
+	if r := query("owner-scoped", ws, url.Values{"q": {"tenant"}}); len(r.Entries) != 0 {
+		t.Errorf("search reached another workspace: %+v", r.Entries)
+	}
+
+	rec := do(t, h, "owner-scoped", ws, "/api/modules")
+	if m := decode[map[string][]string](t, rec)["modules"]; !slices.Contains(m, mod) || slices.Contains(m, "logging") {
+		t.Errorf("scoped module list = %q; want only modules from their workspace's streams", m)
+	}
 }

@@ -2,9 +2,10 @@
 
 Project Booth's logging module (nav group **Manage**). Every pod on the cluster writes to
 stdout/stderr as usual. A node-level collector ships all of it to **Grafana Loki**, and a
-native viewer lets a workspace owner browse, filter and search it by module, time range and
-severity (ADR 0015, ADR 0022). A full **Grafana** view (ADR 0076) is registered next to it as
-a second module, `logging-grafana`. Modules integrate nothing: there is no SDK, no ingestion
+native viewer lets workspace owners browse, filter and search it by module, time range and
+severity (ADR 0015, ADR 0022). Operators see everything; every other owner sees only their own
+workspace's pods (ADR 0077). A full **Grafana** view (ADR 0076), for operators only, is
+registered next to it as a second module, `logging-grafana`. Modules integrate nothing: there is no SDK, no ingestion
 API and no configuration. Brief: `../booth-architecture/agent-briefs/logging.md`.
 
 ## What v0 delivers
@@ -15,6 +16,7 @@ API and no configuration. Brief: `../booth-architecture/agent-briefs/logging.md`
 | A Loki backend that other modules' logs reach automatically | `charts/booth-logging/templates/loki*.yaml` ([0004](docs/decisions/0004-loki-single-binary.md)) |
 | Retention: short (14 days), configurable, not hardcoded | `loki.retentionDays` ([0001](docs/decisions/0001-retention-default.md)) |
 | Native viewer: browse/filter/search by module, time range, severity | `web/` (`@projectbooth/logging-ui`), backed by `internal/api` |
+| Per-workspace scoping (ADR 0077) | collector's `workspace` label, `internal/api` scope pin, [0008](docs/decisions/0008-workspace-scoping.md) |
 | Manifest + health check | `templates/boothmodule.yaml`, `/healthz` (reports Loki's readiness) |
 | CI per `contracts/testing-strategy.md` | `.github/workflows/` |
 | *Optional* Grafana view (ADR 0076) | `templates/grafana*.yaml`, second `BoothModule` `logging-grafana` (iframe-proxy), [0007](docs/decisions/0007-grafana-view-implementation.md) |
@@ -26,15 +28,17 @@ API and no configuration. Brief: `../booth-architecture/agent-briefs/logging.md`
 
  native viewer:  browser ─► core gateway    /modules/logging/api/*    ─► booth-logging API ─► Loki
  Grafana view:   browser ─► core iframe proxy /iframe/logging-grafana/* ─► Grafana           ─► Loki
-                 (core signs X-Booth-Identity; Grafana verifies it and admits owners only)
+                 (core signs X-Booth-Identity; Grafana verifies it and admits operators only)
 
  Loki's NetworkPolicy admits only the collector, the API and Grafana.
 ```
 
 - **Collector** (`collector-config.yaml`): discovers pods on its own node, tails their log
   files, unwraps the container runtime's CRI line format, and pushes to Loki. Labels:
-  `namespace`, `pod`, `container`, `stream` (stdout/stderr) and `module`. See
-  [0005](docs/decisions/0005-module-label.md) for how `module` is derived.
+  `namespace`, `pod`, `container`, `stream` (stdout/stderr), `module` (see
+  [0005](docs/decisions/0005-module-label.md)) and, for a pod labelled
+  `booth.projectbooth.io/workspace`, `workspace`. Every label comes from Kubernetes metadata;
+  nothing a pod prints becomes a label.
 - **Severity** is Loki's own `detected_level`, derived at ingest from a JSON or logfmt
   `level` field or a keyword in plain text. The viewer groups those values into
   Error (error/critical/fatal), Warn, Info, Debug (debug/trace) and Unknown. Modules writing
@@ -45,11 +49,11 @@ API and no configuration. Brief: `../booth-architecture/agent-briefs/logging.md`
 
 ## The Grafana view (ADR 0076)
 
-> **This is a strictly more powerful surface than the native viewer, under the same access
-> rule.** Anyone admitted can run **arbitrary LogQL over every tenant's logs**. With
-> `access.workspaces` empty (the default), that means **the owner of any workspace**. On a
-> multi-tenant install set `access.workspaces`, or turn the view off with
-> `grafana.enabled=false`.
+> **Operators only (ADR 0077).** Anyone admitted can run **arbitrary LogQL over every
+> tenant's logs**, which can't be pinned to one workspace. So only owners acting in an
+> `access.workspaces` workspace are admitted, and every other owner is refused outright. With
+> no operators configured (the default), the Grafana view isn't deployed at all. Turn it off
+> with `grafana.enabled=false`.
 
 - **Registration:** a second `BoothModule`: `id: logging-grafana`,
   `uiIntegrationMode: iframe-proxy`, `navPath: /logging-grafana`, `navGroup: manage`, with its
@@ -65,10 +69,10 @@ API and no configuration. Brief: `../booth-architecture/agent-briefs/logging.md`
   `grafana.identity.issuerUrl` must equal core's iframe-identity issuer **exactly**; the init
   container refuses to start Grafana otherwise, naming both spellings. If core's key is ever
   regenerated, Grafana refuses everyone until `kubectl rollout restart deploy/<release>-grafana`.
-- **Admission** is binary (ADR 0067). An owner of the active workspace (and, if
-  `access.workspaces` is set, of a listed workspace) is admitted as `Editor`, which is what
-  Explore needs. Everyone else is refused outright, never admitted at a lower role. Role sync
-  runs on every request, so losing ownership takes effect immediately. Editors can't change
+- **Admission** is binary (ADR 0077). An owner acting in an `access.workspaces` workspace is
+  admitted as `Editor`, which is what Explore needs. Everyone else, including owners of other
+  workspaces, is refused outright, never admitted at a lower role. Role sync runs on every
+  request, so losing ownership takes effect immediately. Editors can't change
   data sources, users or settings.
 - **Loki data source** is provisioned read-only at this release's Loki. Loki's NetworkPolicy
   admits Grafana. Grafana's own NetworkPolicy admits only booth-core's pods, as defense in
@@ -77,14 +81,16 @@ API and no configuration. Brief: `../booth-architecture/agent-briefs/logging.md`
 ## API
 
 Reached through core's gateway at `/modules/logging/api/...`. Needs `Authorization: Bearer …`
-and `X-Workspace`. **Owner role only**, optionally only in designated workspaces
-([0002](docs/decisions/0002-log-access-policy.md)). Errors are `{"error", "field"?}`.
+and `X-Workspace`. **Owner role only.** An operator (an owner acting in an `access.workspaces`
+workspace) queries platform-wide. Every other owner's queries are pinned server-side to
+`workspace="<active workspace>"`, from the verified identity, whatever the request says
+([0008](docs/decisions/0008-workspace-scoping.md)). Errors are `{"error", "field"?}`.
 
 | Route | |
 |---|---|
 | `GET /api/logs?module=&module=&level=&q=&start=&end=&limit=` | Newest first. `level` ∈ error, warn, info, debug, unknown (repeatable). `q` is a case-insensitive literal substring (≤500 chars). `start`/`end` are RFC 3339 or Unix ns; default is the last hour; `end` is exclusive. `limit` is 1–1000, default 200. Response: `{entries, nextCursor?, query}`. Pass `nextCursor` as `end` for the next page. |
-| `GET /api/modules?start=&end=` | Module names with logs in the range (default: the whole retention window) |
-| `GET /api/config` | `{retentionSeconds, maxQueryRangeSeconds, maxLimit, levels}` |
+| `GET /api/modules?start=&end=` | Module names with logs in the range (default: the whole retention window), from the caller's scope only |
+| `GET /api/config` | `{retentionSeconds, maxQueryRangeSeconds, maxLimit, levels, scope, workspace?}`; `scope` is `platform` (operator) or `workspace` |
 | `GET /healthz` · `GET /livez` | Readiness, which is Loki's readiness (what core polls) · liveness |
 
 Queries longer than `queryMaxRange` are refused with 400. `queryMaxRange` defaults to the
@@ -144,10 +150,16 @@ register it: `registerNativeModule("logging", LoggingApp)`.
 
 ## Read before deploying
 
-- **Access** (ADR 0067, [0002](docs/decisions/0002-log-access-policy.md)): by default **the
-  owner of any workspace can read every tenant's logs**, and the API logs a warning saying so.
-  On a multi-tenant install, set `access.workspaces` (e.g. `[platform]`). The same rule
-  governs the **Grafana view**, where admitted people can run arbitrary LogQL (see above).
+- **Access** (ADR 0067 as amended by ADR 0077, [0008](docs/decisions/0008-workspace-scoping.md)):
+  `access.workspaces` names the **operator** workspaces, whose owners read everything and get
+  the Grafana view. Every other owner reads only their own workspace's labelled pods (notebook
+  servers today). With the default `[]` there are **no operators**: nobody can read shared
+  platform logs (core, storage, catalog, …) and Grafana isn't deployed. Name one, e.g.
+  `[platform]`.
+- **Workspace labels are an access boundary.** A pod labelled
+  `booth.projectbooth.io/workspace: <ws>` is readable by that workspace's owners. Only the
+  platform process that creates such pods should be able to set or change that label. Never put
+  it on a shared module pod.
 - **Grafana's issuer URL** (`grafana.identity.issuerUrl`) must match booth-core's iframe-identity
   issuer exactly. The default assumes core is release `booth-core` in namespace `booth-system`.
 - **The collector runs as root** (uid 0, no capabilities, read-only root filesystem,
@@ -174,6 +186,9 @@ register it: `registerNativeModule("logging", LoggingApp)`.
   BoothModule CRD and a public OIDC discovery document. No authenticated request has gone
   through core's gateway to this API. The authenticated path is covered at the unit level
   (fake verifier) and through a real Loki.
+- **Shared-module logs about a tenant stay invisible to that tenant** (ADR 0077): only
+  per-workspace pods are scoped, and today that means booth-notebooks' user pods. booth-pipeline's
+  job logs join once it runs per-task pods (ADR 0057).
 - **The viewer UI hasn't been viewed in a browser.** It has component tests (jsdom) but no
   visual check against a live backend.
 - **Search is a substring filter over the selected range.** Loki indexes labels, not content

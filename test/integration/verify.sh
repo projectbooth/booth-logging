@@ -13,12 +13,16 @@
 #   4. Loki is unreachable from an unrelated pod (NetworkPolicy), while the API reaches it
 #      (its /healthz is Loki's readiness);
 #   5. the API refuses unauthenticated calls;
+#   5a. (ADR 0077) a pod labelled booth.projectbooth.io/workspace gets a matching workspace label
+#      on its lines, and a pod WITHOUT the label gets none — even though its output claims a
+#      workspace in JSON and logfmt: labels come from pod metadata, never from log content;
 #   6. if GRAFANA_TOKENS names a directory written by test/integration/stubcore (and the chart was
 #      installed with grafana.identity.issuerUrl pointing at the stub-core Service it serves —
-#      see integration.yml), the Grafana view (ADR 0076): its init container fetched the stub's
-#      keys, the logging-grafana BoothModule registered, an owner's signed assertion is admitted
-#      as Editor and can query the real Loki, an editor's is refused outright, and Grafana is
-#      unreachable from a pod that isn't booth-core's gateway.
+#      see integration.yml, which also sets access.workspaces={platform}), the Grafana view
+#      (ADR 0076, operators only per ADR 0077): its init container fetched the stub's keys, the
+#      logging-grafana BoothModule registered, an operator's signed assertion is admitted as
+#      Editor and can query the real Loki, a non-operator owner's and an editor's are refused
+#      outright, and Grafana is unreachable from a pod that isn't booth-core's gateway.
 set -euo pipefail
 
 ctx=${KUBE_CONTEXT:+--context "$KUBE_CONTEXT"}
@@ -45,7 +49,7 @@ step "an unmodified pod's stdout and stderr land in Loki"
 # A previous run's cleanup deletes this namespace without waiting; don't race it.
 k wait --for=delete "namespace/$probe_ns" --timeout=180s >/dev/null 2>&1 || true
 k create namespace "$probe_ns" --dry-run=client -o yaml | k apply -f - >/dev/null
-k -n "$probe_ns" delete pod emitter --ignore-not-found --wait >/dev/null
+k -n "$probe_ns" delete pod emitter ws-emitter --ignore-not-found --wait >/dev/null
 marker="it-$(date +%s)-$RANDOM"
 # Two container ports on purpose: pod discovery yields one target per port, which must not
 # turn into duplicate lines.
@@ -63,9 +67,25 @@ spec:
     - name: app
       image: busybox:1.36
       ports: [{containerPort: 80}, {containerPort: 81}]
-      command: ["sh", "-c", "echo '{\"level\":\"error\",\"msg\":\"$marker json\"}'; echo 'level=warn msg=$marker-stderr' >&2; echo '$marker plain'; sleep 3600"]
+      command: ["sh", "-c", "echo '{\"level\":\"error\",\"workspace\":\"acme\",\"msg\":\"$marker json\"}'; echo 'level=warn workspace=acme msg=$marker-stderr' >&2; echo '$marker plain'; sleep 3600"]
+---
+# ADR 0077: a pod belonging to one workspace, labelled the way booth-notebooks' spawner does it.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ws-emitter
+  namespace: $probe_ns
+  labels:
+    app.kubernetes.io/name: booth-itprobe
+    booth.projectbooth.io/workspace: acme
+spec:
+  restartPolicy: Never
+  containers:
+    - name: app
+      image: busybox:1.36
+      command: ["sh", "-c", "echo '$marker from-acme-pod'; sleep 3600"]
 EOF
-k -n "$probe_ns" wait --for=condition=Ready pod/emitter --timeout=120s >/dev/null
+k -n "$probe_ns" wait --for=condition=Ready pod/emitter pod/ws-emitter --timeout=120s >/dev/null
 
 # Query Loki through a port-forward to its Service: the NetworkPolicy (rightly) keeps other
 # pods out, and port-forwarded traffic enters the pod directly.
@@ -82,7 +102,7 @@ done
 
 query() {
   curl -sSfG "http://127.0.0.1:$lport/loki/api/v1/query_range" \
-    --data-urlencode "query={module=\"itprobe\"} |= \"$marker\"" \
+    --data-urlencode "query={module=\"itprobe\", pod=\"${1:-emitter}\"} |= \"$marker\"" \
     --data-urlencode "start=$(( $(date +%s) - 600 ))000000000" --data-urlencode limit=100
 }
 got=""
@@ -107,6 +127,17 @@ line_label() { echo "$got" | jq -r --arg s "$1" --arg l "$2" '.data.result[] | s
 [ "$(line_label -stderr detected_level)" = warn ] || fail "logfmt level detected"
 # The CRI prefix (timestamp stream flag) must be stripped: Loki stores what the process wrote.
 [ "$(echo "$got" | jq -r '.data.result[].values[][1]' | grep -c "^$marker plain\$")" -eq 1 ] || fail "CRI format not unwrapped"
+
+step "workspace label: from the pod's metadata only, never from what it logged (ADR 0077)"
+[ "$(line_label json workspace)" = null ] || fail "an unlabelled pod's JSON 'workspace' field became a label"
+[ "$(line_label -stderr workspace)" = null ] || fail "an unlabelled pod's logfmt 'workspace=' became a label"
+got=""
+for _ in $(seq 1 45); do
+  got=$(query ws-emitter) || { echo "query failed; retrying" >&2; got='{}'; }
+  [ "$(echo "$got" | jq '[.data.result[]?.values[]] | length')" -ge 1 ] && break
+  sleep 2
+done
+[ "$(line_label from-acme-pod workspace)" = acme ] || fail "labelled pod's lines lack workspace=acme: $(echo "$got" | head -c 300)"
 
 step "the chart's own pods are filed under module=logging"
 curl -sfG "http://127.0.0.1:$lport/loki/api/v1/label/module/values" | jq -e '.data | index("logging")' >/dev/null || fail "module=logging missing"
@@ -133,6 +164,7 @@ if [ -n "${GRAFANA_TOKENS:-}" ]; then
   [ "$(gm navPath)" = /logging-grafana ] || fail "logging-grafana navPath"
   [ "$(bm uiIntegrationMode)" = native ] || fail "the native registration changed"
 
+  operator=$(cat "$GRAFANA_TOKENS/operator.jwt")
   owner=$(cat "$GRAFANA_TOKENS/owner.jwt")
   editor=$(cat "$GRAFANA_TOKENS/editor.jwt")
   g="http://$release-grafana.$ns:3000"
@@ -146,17 +178,21 @@ if [ -n "${GRAFANA_TOKENS:-}" ]; then
   # failures. An HTTP response of any status is not retried, so a 401/403 still counts.
   C="curl -sS -m 5 --retry 15 --retry-delay 2 --retry-all-errors"
 
-  step "Grafana admits an owner as Editor"
-  out=$(as_core g-owner "$C -H 'X-Booth-Identity: $owner' $g/api/user/orgs")
-  echo "$out" | grep -q '"role":"Editor"' || fail "owner not admitted as Editor: $out"
+  step "Grafana admits an operator as Editor"
+  out=$(as_core g-operator "$C -H 'X-Booth-Identity: $operator' $g/api/user/orgs")
+  echo "$out" | grep -q '"role":"Editor"' || fail "operator not admitted as Editor: $out"
+
+  step "Grafana refuses a non-operator owner outright (ADR 0077)"
+  out=$(as_core g-owner "$C -o /dev/null -w 'status=%{http_code}' -H 'X-Booth-Identity: $owner' $g/api/user/orgs")
+  echo "$out" | grep -qE 'status=40[13]' || fail "non-operator owner not refused: $out"
 
   step "Grafana refuses an editor outright"
   out=$(as_core g-editor "$C -o /dev/null -w 'status=%{http_code}' -H 'X-Booth-Identity: $editor' $g/api/user/orgs")
   echo "$out" | grep -qE 'status=40[13]' || fail "editor not refused: $out"
 
-  step "an admitted owner queries the real Loki through Grafana"
+  step "an operator queries the real Loki through Grafana"
   body='{"from":"now-15m","to":"now","queries":[{"refId":"A","datasource":{"uid":"booth-loki"},"expr":"{module=\"itprobe\"} |= \"'"$marker"'\"","queryType":"range","maxLines":10}]}'
-  out=$(as_core g-query "$C -H 'X-Booth-Identity: $owner' -H 'Content-Type: application/json' -H 'Origin: $g' -d '$body' $g/api/ds/query")
+  out=$(as_core g-query "$C -H 'X-Booth-Identity: $operator' -H 'Content-Type: application/json' -H 'Origin: $g' -d '$body' $g/api/ds/query")
   echo "$out" | grep -q "$marker plain" || fail "Grafana query didn't return the probe's lines: $(echo "$out" | head -c 400)"
 
   step "Grafana is closed to pods other than booth-core's"

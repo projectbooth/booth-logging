@@ -333,7 +333,13 @@ func TestChart_AccessAndAuthEnv(t *testing.T) {
 	}
 }
 
-// ---- the Grafana view (ADR 0076) -------------------------------------------------------------
+// ---- the Grafana view (ADR 0076, as amended by ADR 0077) ----------------------------------------
+
+// withOps configures an operator workspace: the Grafana view exists only when there is one
+// (ADR 0077 admits operators only).
+var withOps = []string{"--set", "access.workspaces={platform}"}
+
+func ops(extra ...string) []string { return append(append([]string{}, withOps...), extra...) }
 
 func renderGrafanaModule(t *testing.T, extra ...string) (boothModule, bool) {
 	t.Helper()
@@ -356,7 +362,7 @@ func renderGrafanaModule(t *testing.T, extra ...string) (boothModule, bool) {
 // A second registration from this chart (module-manifest.md's multi-surface pattern), beside
 // the unchanged `logging` one.
 func TestGrafana_SecondRegistration(t *testing.T) {
-	m, ok := renderGrafanaModule(t)
+	m, ok := renderGrafanaModule(t, withOps...)
 	if !ok {
 		t.Fatal("no logging-grafana BoothModule rendered")
 	}
@@ -372,7 +378,7 @@ func TestGrafana_SecondRegistration(t *testing.T) {
 	if m.Spec.Events != nil || m.Spec.Database != nil || m.Spec.WorkloadIdentity != nil {
 		t.Error("the Grafana registration declares capabilities it doesn't use")
 	}
-	dep := helmTemplate(t, "templates/grafana.yaml")
+	dep := helmTemplate(t, "templates/grafana.yaml", withOps...)
 	if !regexp.MustCompile(`readinessProbe:\s+httpGet:\s+path: ` + regexp.QuoteMeta(m.Spec.HealthCheckPath) + `\b`).Match(dep) {
 		t.Errorf("Grafana readinessProbe doesn't use healthCheckPath %q", m.Spec.HealthCheckPath)
 	}
@@ -387,7 +393,7 @@ func grafanaINI(t *testing.T, extra ...string) string {
 	var cm struct {
 		Data map[string]string `yaml:"data"`
 	}
-	if err := yaml.Unmarshal(helmTemplate(t, "templates/grafana-config.yaml", extra...), &cm); err != nil {
+	if err := yaml.Unmarshal(helmTemplate(t, "templates/grafana-config.yaml", ops(extra...)...), &cm); err != nil {
 		t.Fatal(err)
 	}
 	return cm.Data["grafana.ini"]
@@ -428,14 +434,14 @@ func TestGrafana_IssuerAndDataSourceWiring(t *testing.T) {
 	if !strings.Contains(ini, `"iss": "`+iss+`"`) {
 		t.Errorf("expect_claims iss not %q (trailing slash must be trimmed):\n%s", iss, ini)
 	}
-	dep := string(helmTemplate(t, "templates/grafana.yaml", "--set", "grafana.identity.issuerUrl="+iss+"/"))
+	dep := string(helmTemplate(t, "templates/grafana.yaml", ops("--set", "grafana.identity.issuerUrl="+iss+"/")...))
 	if !strings.Contains(dep, "- -issuer="+iss+"\n") || !strings.Contains(dep, "- fetch-jwks") {
 		t.Errorf("init container not fetching keys for %q:\n%s", iss, dep)
 	}
 	var cm struct {
 		Data map[string]string `yaml:"data"`
 	}
-	_ = yaml.Unmarshal(helmTemplate(t, "templates/grafana-config.yaml"), &cm)
+	_ = yaml.Unmarshal(helmTemplate(t, "templates/grafana-config.yaml", withOps...), &cm)
 	ds := cm.Data["datasources.yaml"]
 	if !strings.Contains(ds, "url: http://booth-logging-loki:3100") || !strings.Contains(ds, "editable: false") {
 		t.Errorf("datasources.yaml:\n%s", ds)
@@ -450,7 +456,8 @@ func TestGrafana_Validation(t *testing.T) {
 		{"access.workspaces={a'b}", "access.workspaces entries must be workspace slugs"},
 		{"grafana.identity.issuerUrl=", "grafana.identity.issuerUrl is required"},
 	} {
-		args := append([]string{"template", "x", chartDir, "--set", tc.set}, requiredValues...)
+		// The case's own --set goes last, so it wins over withOps.
+		args := append(append([]string{"template", "x", chartDir}, ops(requiredValues...)...), "--set", tc.set)
 		out, err := exec.Command("helm", args...).CombinedOutput()
 		if err == nil || !bytes.Contains(out, []byte(tc.want)) {
 			t.Errorf("%s: want failure %q, got: %s", tc.set, tc.want, out)
@@ -461,7 +468,7 @@ func TestGrafana_Validation(t *testing.T) {
 // Loki admits Grafana; Grafana admits only core's gateway (defense in depth, ADR 0076).
 func TestGrafana_NetworkPolicies(t *testing.T) {
 	var loki, graf map[string]any
-	for _, d := range docs(t, helmTemplate(t, "templates/networkpolicy.yaml")) {
+	for _, d := range docs(t, helmTemplate(t, "templates/networkpolicy.yaml", withOps...)) {
 		switch d["metadata"].(map[string]any)["name"] {
 		case "booth-logging-loki":
 			loki = d
@@ -484,15 +491,70 @@ func TestGrafana_NetworkPolicies(t *testing.T) {
 	}
 }
 
-func TestGrafana_Disabled(t *testing.T) {
-	off := []string{"--set", "grafana.enabled=false"}
-	if _, ok := renderGrafanaModule(t, off...); ok {
-		t.Error("logging-grafana registered with grafana.enabled=false")
+// No Grafana at all when it's disabled — or when there are no operators to admit (ADR 0077):
+// no workload, no registration (so no nav entry that refuses everyone), no NetworkPolicy, and
+// Loki's policy doesn't admit it.
+func TestGrafana_AbsentWithoutOperatorsOrWhenDisabled(t *testing.T) {
+	for name, extra := range map[string][]string{
+		"disabled":                   ops("--set", "grafana.enabled=false"),
+		"no operators (the default)": nil,
+		"explicitly no operators":    {"--set", "access.workspaces=null"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, ok := renderGrafanaModule(t, extra...); ok {
+				t.Error("logging-grafana registered")
+			}
+			all := string(helmTemplate(t, "", extra...))
+			for _, gone := range []string{"booth-logging-grafana", "app.kubernetes.io/component: grafana"} {
+				if strings.Contains(all, gone) {
+					t.Errorf("%q still rendered", gone)
+				}
+			}
+			if m := renderBoothModule(t); m.Spec.ID != "logging" {
+				t.Errorf("native registration missing: %+v", m.Spec)
+			}
+		})
 	}
-	all := string(helmTemplate(t, "", off...))
-	for _, gone := range []string{"booth-logging-grafana", "app.kubernetes.io/component: grafana"} {
-		if strings.Contains(all, gone) {
-			t.Errorf("%q still rendered with grafana.enabled=false", gone)
-		}
+}
+
+// ADR 0077: Grafana admits operators only — the expression lists exactly the operator
+// workspaces' owner groups, whole-string, and has no "any owner" form.
+func TestGrafana_AdmitsOperatorsOnly(t *testing.T) {
+	ini := grafanaINI(t, "--set", "access.workspaces={platform,ops}")
+	m := regexp.MustCompile(`role_attribute_path = (.*)`).FindStringSubmatch(ini)
+	if m == nil {
+		t.Fatal("no role_attribute_path")
+	}
+	want := "(contains((\"groups\" || `[]`), '/workspaces/platform/owner') || contains((\"groups\" || `[]`), '/workspaces/ops/owner')) && 'Editor' || ''"
+	if m[1] != want {
+		t.Errorf("role_attribute_path =\n %s\nwant\n %s", m[1], want)
+	}
+}
+
+// ADR 0077: the workspace label comes from the pod's booth.projectbooth.io/workspace label and
+// nothing else. In particular no stage of the line-processing pipeline may turn line content
+// into labels — otherwise a pod could label its own lines into another tenant's view.
+func TestCollector_WorkspaceLabelFromPodMetadataOnly(t *testing.T) {
+	cfg := string(helmTemplate(t, "templates/collector-config.yaml"))
+	rule := regexp.MustCompile(`rule \{\s+source_labels = \["__meta_kubernetes_pod_label_booth_projectbooth_io_workspace"\]\s+regex\s+= "\(\[a-z0-9-\]\+\)"\s+target_label\s+= "workspace"\s+\}`)
+	if !rule.MatchString(cfg) {
+		t.Errorf("no workspace rule copying the pod label (slug-validated):\n%s", cfg)
+	}
+	if n := strings.Count(cfg, `target_label  = "workspace"`); n != 1 {
+		t.Errorf("%d rules set the workspace label; want exactly the one from the pod label", n)
+	}
+
+	// Nothing in loki.process may extract labels or structured metadata from a line.
+	i := strings.Index(cfg, `loki.process "pods"`)
+	j := strings.Index(cfg, `loki.write "loki"`)
+	if i < 0 || j < i {
+		t.Fatal("loki.process block not found")
+	}
+	var stages []string
+	for _, m := range regexp.MustCompile(`(?m)^\s*(stage\.[a-z_]+)`).FindAllStringSubmatch(cfg[i:j], -1) {
+		stages = append(stages, m[1])
+	}
+	if strings.Join(stages, ",") != "stage.cri,stage.label_drop" {
+		t.Errorf("loki.process stages = %v; only stage.cri and stage.label_drop are allowed (no stage may turn line content into labels)", stages)
 	}
 }

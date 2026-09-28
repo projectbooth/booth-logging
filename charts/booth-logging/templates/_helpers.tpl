@@ -86,27 +86,35 @@ be spliced into a JMESPath string literal.
 {{- end -}}
 
 {{/*
-The Grafana view's admission gate (ADR 0067 via ADR 0076), as a JMESPath expression for
-[auth.jwt] role_attribute_path. It evaluates to the one role every admitted person gets
-(grafana.admittedRole) or to '' — and with role_attribute_strict = true, '' refuses the login
-outright. There is no third outcome: nobody is admitted at a lower Grafana role.
+Whether the Grafana view is deployed at all: grafana.enabled AND at least one operator workspace
+in access.workspaces. ADR 0077 admits operators only, so with no operators nobody could ever use
+it — rather than register a nav entry that refuses everyone, nothing is rendered.
+*/}}
+{{- define "booth-logging.grafanaActive" -}}
+{{- if and .Values.grafana.enabled .Values.access.workspaces -}}true{{- end -}}
+{{- end -}}
+
+{{/*
+The Grafana view's admission gate (ADR 0076, as amended by ADR 0077: operators only), as a
+JMESPath expression for [auth.jwt] role_attribute_path. It evaluates to the one role every
+admitted person gets (grafana.admittedRole) or to '' — and with role_attribute_strict = true,
+'' refuses the login outright. There is no third outcome: nobody is admitted at a lower role.
 
 The claims are core's X-Booth-Identity assertion (ADR 0069), whose groups claim carries exactly
-one entry, the ACTIVE workspace's "/workspaces/<ws>/<role>" (ADR 0025). So:
-  - no allowlist: admitted iff that entry ends in /owner;
-  - allowlist:    admitted iff that entry is "/workspaces/<allowed>/owner" for some allowed slug.
-An absent or malformed groups claim is treated as [] (refused), never an evaluation error.
+one entry, the ACTIVE workspace's "/workspaces/<ws>/<role>" (ADR 0025). Admitted iff that entry
+is "/workspaces/<operator workspace>/owner" — an owner acting in one of access.workspaces. Any
+other owner is refused: Grafana runs arbitrary LogQL, which can't be pinned to one workspace.
+Whole-string matches, so a near-miss slug never matches. An absent or malformed groups claim is
+treated as [] (refused), never an evaluation error.
 */}}
 {{- define "booth-logging.grafanaRoleAttributePath" -}}
+{{- if not .Values.access.workspaces -}}
+{{- fail "internal: the Grafana admission expression needs at least one operator workspace" -}}
+{{- end -}}
 {{- $groups := printf "(\"%s\" || `[]`)" .Values.oidc.groupsClaim -}}
-{{- $role := .Values.grafana.admittedRole -}}
-{{- if .Values.access.workspaces -}}
 {{- $checks := list -}}
 {{- range (splitList "," (include "booth-logging.accessWorkspaces" .)) -}}
 {{- $checks = append $checks (printf "contains(%s, '/workspaces/%s/owner')" $groups .) -}}
 {{- end -}}
-{{- printf "(%s) && '%s' || ''" (join " || " $checks) $role -}}
-{{- else -}}
-{{- printf "length(%s[?starts_with(@, '/workspaces/') && ends_with(@, '/owner')]) > `0` && '%s' || ''" $groups $role -}}
-{{- end -}}
+{{- printf "(%s) && '%s' || ''" (join " || " $checks) .Values.grafana.admittedRole -}}
 {{- end -}}

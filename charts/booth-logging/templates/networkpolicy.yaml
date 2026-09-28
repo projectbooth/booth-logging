@@ -23,7 +23,7 @@ spec:
         - podSelector:
             matchLabels:
               {{- include "booth-logging.selectorLabels" (dict "ctx" . "component" "api") | nindent 14 }}
-        {{- if .Values.grafana.enabled }}
+        {{- if include "booth-logging.grafanaActive" . }}
         - podSelector:
             matchLabels:
               {{- include "booth-logging.selectorLabels" (dict "ctx" . "component" "grafana") | nindent 14 }}
@@ -31,7 +31,7 @@ spec:
       ports:
         - port: 3100
           protocol: TCP
-{{- if .Values.grafana.enabled }}
+{{- if include "booth-logging.grafanaActive" . }}
 ---
 # Grafana verifies a signed assertion on every request, so this is defense in depth rather than
 # the boundary (ADR 0076): only booth-core's gateway has a reason to reach it.

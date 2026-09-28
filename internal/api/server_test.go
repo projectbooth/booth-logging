@@ -38,6 +38,7 @@ type recordingLoki struct {
 	entries  []loki.Entry
 	labels   []string
 	labelReq [2]time.Time
+	selector string
 	err      error
 	readyErr error
 }
@@ -53,12 +54,16 @@ func (r *recordingLoki) QueryRange(_ context.Context, req loki.QueryRangeRequest
 	return r.entries, nil
 }
 
-func (r *recordingLoki) LabelValues(_ context.Context, _ string, start, end time.Time) ([]string, error) {
+func (r *recordingLoki) LabelValues(_ context.Context, _ string, start, end time.Time, selector string) ([]string, error) {
 	r.labelReq = [2]time.Time{start, end}
+	r.selector = selector
 	return r.labels, r.err
 }
 
 func (r *recordingLoki) Ready(context.Context) error { return r.readyErr }
+
+// operators makes owner-acme an operator, for tests about filter handling rather than scope.
+var operators = AccessPolicy{Workspaces: []string{"acme"}}
 
 var fixedNow = time.Date(2026, 9, 22, 12, 0, 0, 0, time.UTC)
 
@@ -114,9 +119,11 @@ func TestAccess(t *testing.T) {
 		{"viewer with forged owner header", open, "viewer-acme", "acme", []string{auth.HeaderBoothRole, "owner"}, 403},
 		// ...and the gateway narrowing an owner's role is honoured.
 		{"owner narrowed by gateway", open, "owner-acme", "acme", []string{auth.HeaderBoothRole, "viewer"}, 403},
-		{"restricted: owner of an undesignated workspace", restricted, "owner-acme", "acme", nil, 403},
+		// ADR 0077: an owner outside the operator list is admitted, scoped to their workspace
+		// (TestScope checks the scoping itself).
+		{"restricted: owner of an undesignated workspace", restricted, "owner-acme", "acme", nil, 200},
 		{"restricted: owner of the designated workspace", restricted, "owner-platform", "platform", nil, 200},
-		{"restricted: same person, acting in another workspace", restricted, "owner-platform", "acme", nil, 403},
+		{"restricted: operator acting in a workspace where they're only a viewer", restricted, "owner-platform", "acme", nil, 403},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -147,7 +154,7 @@ func TestHealth(t *testing.T) {
 
 func TestLogs_BuildsQueryFromFilters(t *testing.T) {
 	l := &recordingLoki{}
-	h := newTestServer(l, AccessPolicy{})
+	h := newTestServer(l, operators) // platform-wide: this is about filters, not scoping (TestScope)
 	q := url.Values{"module": {"storage", "catalog"}, "level": {"error", "WARN"}, "q": {"db down"}, "limit": {"50"},
 		"start": {"2026-09-22T10:00:00Z"}, "end": {"1790078400000000000"}}
 	rec := do(t, h, "owner-acme", "acme", "/api/logs?"+q.Encode())
@@ -169,7 +176,7 @@ func TestLogs_BuildsQueryFromFilters(t *testing.T) {
 
 func TestLogs_Defaults(t *testing.T) {
 	l := &recordingLoki{}
-	h := newTestServer(l, AccessPolicy{})
+	h := newTestServer(l, operators) // platform-wide: this is about filters, not scoping (TestScope)
 	if rec := do(t, h, "owner-acme", "acme", "/api/logs"); rec.Code != 200 {
 		t.Fatal(rec.Body)
 	}
@@ -278,5 +285,72 @@ func TestConfig(t *testing.T) {
 	c := decode[ConfigResponse](t, do(t, h, "owner-acme", "acme", "/api/config"))
 	if c.RetentionSeconds != 336*3600 || c.MaxQueryRangeSeconds != 24*3600 || c.MaxLimit != MaxLimit || strings.Join(c.Levels, ",") != "error,warn,info,debug,unknown" {
 		t.Errorf("config = %+v", c)
+	}
+}
+
+// ADR 0077: operators (owners acting in an access.workspaces workspace) query platform-wide;
+// every other owner's queries are pinned to their active workspace — from the verified
+// identity, whatever the request says.
+func TestScope(t *testing.T) {
+	tokens["owner-acme-and-platform"] = &auth.Claims{Subject: "dana", Groups: []string{"/workspaces/acme/owner", "/workspaces/platform/owner"}}
+	t.Cleanup(func() { delete(tokens, "owner-acme-and-platform") })
+
+	for _, tc := range []struct {
+		name, token, ws string
+		access          AccessPolicy
+		wantPin         string // "" = platform-wide
+		wantScope       string
+	}{
+		{"no operators configured: every owner is scoped", "owner-acme", "acme", AccessPolicy{}, "acme", "workspace"},
+		{"owner outside the operator list is scoped", "owner-acme", "acme", AccessPolicy{Workspaces: []string{"platform"}}, "acme", "workspace"},
+		{"operator is platform-wide", "owner-platform", "platform", AccessPolicy{Workspaces: []string{"platform"}}, "", "platform"},
+		{"the same person is scoped when acting in their other workspace", "owner-acme-and-platform", "acme", AccessPolicy{Workspaces: []string{"platform"}}, "acme", "workspace"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			l := &recordingLoki{labels: []string{"notebooks"}}
+			h := newTestServer(l, tc.access)
+
+			// A client-supplied workspace parameter or matcher is ignored, not honoured.
+			if rec := do(t, h, tc.token, tc.ws, "/api/logs?workspace=globex&module=notebooks"); rec.Code != 200 {
+				t.Fatalf("logs: %d %s", rec.Code, rec.Body)
+			}
+			want := `{module=~"notebooks"}`
+			if tc.wantPin != "" {
+				want = `{module=~"notebooks", workspace="` + tc.wantPin + `"}`
+			}
+			if got := l.queries[0].Query; got != want {
+				t.Errorf("query = %s, want %s", got, want)
+			}
+
+			do(t, h, tc.token, tc.ws, "/api/modules")
+			wantSel := ""
+			if tc.wantPin != "" {
+				wantSel = `{module=~".+", workspace="` + tc.wantPin + `"}`
+			}
+			if l.selector != wantSel {
+				t.Errorf("modules selector = %q, want %q", l.selector, wantSel)
+			}
+
+			c := decode[ConfigResponse](t, do(t, h, tc.token, tc.ws, "/api/config"))
+			if c.Scope != tc.wantScope || c.Workspace != tc.wantPin {
+				t.Errorf("config scope = %q/%q, want %q/%q", c.Scope, c.Workspace, tc.wantScope, tc.wantPin)
+			}
+		})
+	}
+}
+
+// A request that reaches a handler with no scope attached is refused, never treated as
+// platform-wide.
+func TestScope_MissingFailsClosed(t *testing.T) {
+	if ws, ok := pin(context.Background()); ok || ws != "" {
+		t.Fatalf("pin(no scope) = %q, %v; want refusal", ws, ok)
+	}
+	s := &server{Deps: Deps{Loki: &recordingLoki{}, Retention: time.Hour, MaxQueryRange: time.Hour, Now: time.Now}}
+	for name, h := range map[string]http.HandlerFunc{"logs": s.handleLogs, "modules": s.handleModules} {
+		rec := httptest.NewRecorder()
+		h(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("%s without a scope: %d, want 403", name, rec.Code)
+		}
 	}
 }

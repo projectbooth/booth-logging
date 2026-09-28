@@ -16,15 +16,20 @@ on merge to `main` and nightly. It deploys the chart into a kind cluster and run
 - The chart's own pods are filed under `module=logging`.
 - **Loki is unreachable from an unrelated pod** (NetworkPolicy), while the API reaches it.
 - The API refuses unauthenticated requests (401).
+- **Workspace labels come from pod metadata only** (ADR 0077): a pod labelled
+  `booth.projectbooth.io/workspace: acme` gets `workspace=acme` on its lines, and an unlabelled
+  pod whose output claims `acme` (a JSON field and a logfmt pair) gets no workspace label.
 - **The Grafana view** (ADR 0076), against a stub of booth-core's iframe-identity issuer
   ([`stubcore`](stubcore/main.go), served by [`deploy-stub-core.sh`](deploy-stub-core.sh)),
   because no real core runs here:
   - the `fetch-jwks` init container fetched the stub's keys and Grafana became ready;
   - the `logging-grafana` BoothModule registered as `iframe-proxy` while `logging` stayed
     `native`;
-  - an owner's signed assertion is admitted as `Editor` and queries the probe pod's lines from
-    the real Loki (proving Loki's NetworkPolicy admits Grafana);
-  - an editor's assertion is refused outright;
+  - an operator's (an owner of `platform`, the chart's `access.workspaces` here) signed
+    assertion is admitted as `Editor` and queries the probe pod's lines from the real Loki
+    (proving Loki's NetworkPolicy admits Grafana);
+  - a non-operator owner's assertion (owner of `acme`) and an editor's are refused outright
+    (ADR 0077);
   - a pod not labelled as booth-core can't reach Grafana at all.
 
 ## Where it has actually run
@@ -39,8 +44,8 @@ Retention was also checked by hand on that cluster: Loki's `/config` showed
 `retention_period: 2w`, `max_query_lookback: 2w`, `retention_enabled: true`. Actual deletion
 after 14 days isn't something a CI run can wait for.
 
-The Grafana steps above were also run on that local kind cluster (2026-09-28), twice back to
-back, and passed.
+The Grafana steps and the workspace-label steps above were also run on that local kind cluster
+(2026-09-28) and passed.
 
 ## Not covered yet
 

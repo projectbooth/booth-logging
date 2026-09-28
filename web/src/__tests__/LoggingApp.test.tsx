@@ -11,7 +11,7 @@ const getAccessToken = () => "tok";
 const renderApp = (role: WorkspaceRole = "owner") =>
   render(<LoggingApp workspace="acme" role={role} theme="light" getAccessToken={getAccessToken} />);
 
-const baseRoutes = (logs: Routes[number][1], cfg = config): Routes => [
+const baseRoutes = (logs: Routes[number][1], cfg: Record<string, unknown> = config): Routes => [
   ["GET /config", () => ok(cfg)],
   ["GET /modules", () => ok({ modules: ["catalog", "storage"] })],
   [/^GET \/logs\?/, logs],
@@ -23,7 +23,7 @@ describe("LoggingApp", () => {
   it("doesn't call the API for a non-owner and explains why", () => {
     const m = mockFetch([]);
     renderApp("editor");
-    expect(screen.getByRole("status")).toHaveTextContent(/only workspace owners can read them/);
+    expect(screen.getByRole("status")).toHaveTextContent(/Only workspace owners can read logs/);
     expect(m.fn).not.toHaveBeenCalled();
   });
 
@@ -109,6 +109,21 @@ describe("LoggingApp", () => {
     expect(screen.getByText("booth-storage-abc")).toBeInTheDocument();
     expect(screen.getByText("stdout")).toBeInTheDocument();
     expect(screen.getByText(/"msg": "db down"/)).toBeInTheDocument();
+  });
+
+  it("tells a workspace-scoped owner they see only their workspace's own pods (ADR 0077)", async () => {
+    mockFetch(baseRoutes(() => ok({ entries: [], query: "" }), { ...config, scope: "workspace", workspace: "acme" }));
+    renderApp();
+    const banner = await screen.findByText(/own pods only/);
+    expect(banner).toHaveTextContent("acme");
+    expect(banner).toHaveTextContent(/shared platform services aren't included/);
+  });
+
+  it("shows no scope notice to an operator", async () => {
+    mockFetch(baseRoutes(() => ok({ entries: [], query: "" })));
+    renderApp();
+    await screen.findByText(/No log lines match/);
+    expect(screen.queryByText(/own pods only/)).not.toBeInTheDocument();
   });
 
   it("drops a stale response that lands after a newer filter's", async () => {

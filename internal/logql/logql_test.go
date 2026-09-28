@@ -21,6 +21,9 @@ func TestQuery(t *testing.T) {
 		{"error bucket covers critical and fatal", Filter{Levels: []Level{LevelError}}, `{module=~".+"} | detected_level=~"critical|error|fatal"`},
 		{"debug bucket covers trace", Filter{Levels: []Level{LevelDebug, LevelWarn}}, `{module=~".+"} | detected_level=~"debug|trace|warn"`},
 		{"all three", Filter{Modules: []string{"catalog"}, Levels: []Level{LevelWarn}, Search: "slow"}, `{module=~"catalog"} |~ "(?i)slow" | detected_level=~"warn"`},
+		{"workspace pin is a stream-selector matcher", Filter{Workspace: "acme"}, `{module=~".+", workspace="acme"}`},
+		{"workspace pin with every other filter", Filter{Modules: []string{"notebooks"}, Levels: []Level{LevelError}, Search: "oom", Workspace: "acme"},
+			`{module=~"notebooks", workspace="acme"} |~ "(?i)oom" | detected_level=~"critical|error|fatal"`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -43,6 +46,9 @@ func TestValidate(t *testing.T) {
 		{Levels: []Level{"verbose"}},
 		{Search: strings.Repeat("x", MaxSearchLength+1)},
 		{Search: "two\nlines"},
+		{Workspace: "Acme"},
+		{Workspace: `acme", workspace=~".*`},
+		{Workspace: "a/b"},
 	}
 	for _, f := range bad {
 		if err := f.Validate(); err == nil {

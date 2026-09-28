@@ -5,6 +5,10 @@ JWT auth over core's `X-Booth-Identity`, a binary ADR 0067 admission gate, and a
 `logging-grafana` registration. It left the mechanism to this module. The first item below is
 a real mismatch between ADR 0076's wording and what Grafana accepts.
 
+**Amended by ADR 0077 (2026-09-28):** Grafana now admits **operators only** (owners acting in an
+`access.workspaces` workspace), and isn't deployed at all when there are none. Items 2 and 4
+below are updated accordingly; see also [0008](0008-workspace-scoping.md).
+
 ## 1. Grafana reads core's keys from a file, not `jwk_set_url` (deviation from ADR 0076's wording)
 
 ADR 0076 (and this task) said to point Grafana's `jwk_set_url` at core's iframe-identity JWKS.
@@ -46,17 +50,19 @@ rediscover this.
 
 The gate is ADR 0076's first suggestion, not a pre-auth proxy. The chart renders a JMESPath
 expression from the same `access.workspaces` and `oidc.groupsClaim` values the native viewer
-uses. It evaluates to `grafana.admittedRole` or `''`. With `role_attribute_strict = true`,
+uses. Since ADR 0077 it admits only a whole-string match of `/workspaces/<operator
+workspace>/owner`; there's no "any owner" form any more. It evaluates to `grafana.admittedRole`
+or `''`. With `role_attribute_strict = true`,
 `''` refuses the login, and role sync runs on every request (`skip_org_role_sync = false`).
 `access.workspaces` entries are now validated as workspace slugs, because they're spliced into
 that expression.
 
 `test/grafana` runs the real Grafana 13.2.2 with the chart's exact rendered `grafana.ini`, the
 chart's read-only root filesystem, the real test Loki, and assertions signed like core's.
-- **Refused:** editors, viewers, a missing or malformed groups claim, wrong `aud`, wrong `iss`,
-  expired tokens, a foreign signing key, no header at all, and an owner of a non-allowlisted or
-  near-miss workspace.
-- **Admitted:** owners, who can query Loki.
+- **Refused:** an owner of a non-operator workspace (ADR 0077's case), editors, viewers, a
+  missing or malformed groups claim, wrong `aud`, wrong `iss`, expired tokens, a foreign signing
+  key, no header at all, and near-miss workspace slugs.
+- **Admitted:** operators, who can query Loki.
 - **Demotion:** a person who loses ownership is refused on their very next request.
 
 The test was also run with the gate deliberately broken, and it failed both times:
@@ -75,14 +81,13 @@ reading admin settings are refused. The Loki data source is provisioned `editabl
 can save dashboards, but Grafana's state is an `emptyDir`, so they're lost when the pod
 restarts.
 
-## 4. Enabled by default
+## 4. Enabled by default, but deployed only with operators
 
-`grafana.enabled: true`, so a default install registers the `logging-grafana` nav entry as
-ADR 0076 describes. Combined with ADR 0067's open-by-default rule, the owner of any workspace can
-run arbitrary LogQL over every tenant's logs out of the box. That's the same exposure the
-native viewer has, on a stronger tool. NOTES.txt and the README say so prominently.
-**For the coordinator:** if you'd rather the Grafana view be opt-in (`enabled: false` by
-default), it's a one-line change with no other effects.
+`grafana.enabled: true`. Since ADR 0077, Grafana is actually deployed (workload, registration
+and nav entry) only when `access.workspaces` names at least one operator workspace, and only
+those operators are admitted. A default install, which has no operators, therefore has no
+Grafana view. The earlier concern (any owner running arbitrary LogQL out of the box) no longer
+applies.
 
 ## 5. Everything else Grafana could be entered by is off
 

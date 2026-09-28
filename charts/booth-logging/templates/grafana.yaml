@@ -1,4 +1,4 @@
-{{- if .Values.grafana.enabled }}
+{{- if include "booth-logging.grafanaActive" . }}
 # The Grafana power-user view (ADR 0076). Config and admission rule: grafana-config.yaml.
 apiVersion: apps/v1
 kind: Deployment

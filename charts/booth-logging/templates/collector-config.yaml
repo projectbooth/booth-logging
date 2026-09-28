@@ -2,9 +2,10 @@
 #
 #   pods on this node ─► labels + log file path ─► tail files ─► parse CRI format ─► Loki
 #
-# Each line is labelled with namespace, pod, container, stream (stdout/stderr) and module.
-# Nothing is parsed out of the line itself: Loki derives severity at ingest
-# (discover_log_levels in loki-config.yaml).
+# Each line is labelled with namespace, pod, container, stream (stdout/stderr), module and,
+# for a pod carrying booth.projectbooth.io/workspace, workspace (ADR 0077). Every label comes
+# from Kubernetes metadata; nothing is parsed out of the line itself. (Loki derives severity at
+# ingest, as structured metadata rather than a label: discover_log_levels in loki-config.yaml.)
 #
 # "module" is the first of these that the pod has, later rules overriding earlier ones:
 #   1. the label booth.projectbooth.io/module (explicit; this chart sets it on its own pods)
@@ -78,6 +79,19 @@ data:
         target_label  = "module"
       }
 
+      // workspace (ADR 0077): copied ONLY from the pod's booth.projectbooth.io/workspace
+      // label — Kubernetes metadata, set by the platform process that created the pod (e.g.
+      // booth-notebooks' spawner) from authenticated identity. It is decided here, per pod,
+      // before any line is read; nothing in loki.process below extracts labels from line
+      // content, so a pod can't label its own lines by what it prints. A value that isn't an
+      // ADR 0025 workspace slug is dropped (no label), never passed through. The native
+      // viewer pins every non-operator owner's query to this label.
+      rule {
+        source_labels = ["__meta_kubernetes_pod_label_booth_projectbooth_io_workspace"]
+        regex         = "([a-z0-9-]+)"
+        target_label  = "workspace"
+      }
+
       // The kubelet writes each container's output to
       // /var/log/pods/<namespace>_<pod>_<uid>/<container>/<restart>.log
       rule {
@@ -98,6 +112,9 @@ data:
     }
 
     loki.process "pods" {
+      // Deliberately no json/logfmt/regex/labels stages: every label on a line comes from
+      // Kubernetes metadata above, never from what the pod wrote (ADR 0077).
+      //
       // Unwraps the container runtime's line format (timestamp, stream, flags) and joins
       // lines the runtime split, so Loki stores exactly what the process wrote.
       stage.cri {}

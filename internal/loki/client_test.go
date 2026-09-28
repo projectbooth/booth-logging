@@ -109,7 +109,7 @@ func TestRealLoki_LabelValuesAndReady(t *testing.T) {
 	lokitest.Push(t, url, map[string]string{"module": mod}, lokitest.Line{At: time.Now(), Text: "hello"})
 
 	lokitest.Eventually(t, 15*time.Second, func() bool {
-		vals, err := c.LabelValues(context.Background(), "module", time.Now().Add(-time.Hour), time.Now().Add(time.Minute))
+		vals, err := c.LabelValues(context.Background(), "module", time.Now().Add(-time.Hour), time.Now().Add(time.Minute), "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -117,6 +117,30 @@ func TestRealLoki_LabelValuesAndReady(t *testing.T) {
 	})
 	if err := c.Ready(context.Background()); err != nil {
 		t.Errorf("Ready: %v", err)
+	}
+}
+
+// A selector narrows label values to matching streams (how a workspace-scoped owner's module
+// list is built, ADR 0077).
+func TestRealLoki_LabelValuesWithSelector(t *testing.T) {
+	url := lokitest.URL(t)
+	c := loki.New(url, nil)
+	mine, theirs := lokitest.UniqueModule(t), lokitest.UniqueModule(t)
+	ws := "ws-" + mine[3:]
+	lokitest.Push(t, url, map[string]string{"module": mine, "workspace": ws}, lokitest.Line{At: time.Now(), Text: "a"})
+	lokitest.Push(t, url, map[string]string{"module": theirs}, lokitest.Line{At: time.Now(), Text: "b"})
+
+	var vals []string
+	lokitest.Eventually(t, 15*time.Second, func() bool {
+		var err error
+		vals, err = c.LabelValues(context.Background(), "module", time.Now().Add(-time.Hour), time.Now().Add(time.Minute), `{workspace="`+ws+`"}`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return slices.Contains(vals, mine)
+	})
+	if !slices.Equal(vals, []string{mine}) {
+		t.Errorf("values = %q, want only %q", vals, mine)
 	}
 }
 
@@ -159,6 +183,25 @@ func TestQueryRange_StructuredMetadataElement(t *testing.T) {
 	}
 	if got[0].Labels["detected_level"] != "warn" || got[1].Labels["detected_level"] != "error" || got[2].Labels["module"] != "m" {
 		t.Errorf("got %+v", got)
+	}
+}
+
+// Metadata derived from a line can never overwrite a stream label: module and workspace
+// (ADR 0077) come from pod metadata at ingest, and must stay that way on the way out.
+func TestQueryRange_MetadataCannotOverrideStreamLabels(t *testing.T) {
+	c := fakeLoki(t, `{"data":{"resultType":"streams","result":[
+		{"stream":{"module":"notebooks","workspace":"acme"},"values":[
+			["2","flat",{"workspace":"globex","module":"x"}],
+			["1","nested",{"structuredMetadata":{"workspace":"globex"},"parsed":{"workspace":"globex"}}]
+		]}]}}`, 200)
+	got, err := c.QueryRange(context.Background(), loki.QueryRangeRequest{Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range got {
+		if e.Labels["workspace"] != "acme" || e.Labels["module"] != "notebooks" {
+			t.Errorf("%s: labels = %v", e.Line, e.Labels)
+		}
 	}
 }
 

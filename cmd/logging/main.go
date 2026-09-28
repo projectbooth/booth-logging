@@ -52,10 +52,12 @@ func run() error {
 		return fmt.Errorf("loading config: %w", err)
 	}
 
+	// ADR 0077: operators (owners acting in access.workspaces) read everything; every other
+	// owner only their own workspace's labeled pods.
 	if len(cfg.AccessWorkspaces) == 0 {
-		slog.Warn("log access is open to the owner of ANY workspace: logs are cluster-wide, so every workspace owner can read every tenant's log lines. Set access.workspaces in the chart to restrict it (docs/decisions/0002).")
+		slog.Info("no operator workspaces configured: every owner reads only their own workspace's pods; nobody can read shared platform logs (set access.workspaces to name operator workspaces)")
 	} else {
-		slog.Info("log access restricted to owners of designated workspaces", "workspaces", cfg.AccessWorkspaces)
+		slog.Info("operators (owners of these workspaces) read all logs; other owners only their own workspace's pods", "operatorWorkspaces", cfg.AccessWorkspaces)
 	}
 
 	verifier, err := auth.NewVerifier(ctx, cfg.OIDC)

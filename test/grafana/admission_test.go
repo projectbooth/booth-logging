@@ -300,15 +300,16 @@ func uniqueSub(t *testing.T) string {
 
 // ---- the tests ----------------------------------------------------------------------------
 
-// Default policy (access.workspaces empty): the owner of the active workspace is admitted as
-// Editor and can query Loki; everyone and everything else is refused outright.
-func TestAdmission_DefaultPolicy(t *testing.T) {
+// ADR 0077: Grafana admits operators only — an owner acting in an access.workspaces workspace —
+// as Editor, who can query Loki. Every other owner, and everyone and everything else, is
+// refused outright, never admitted at a lower role.
+func TestAdmission_OperatorsOnly(t *testing.T) {
 	lokiURL := lokitest.URL(t)
 	iss := newIssuer(t)
-	g := startGrafana(t, iss)
+	g := startGrafana(t, iss, "--set", "access.workspaces={platform}")
 
-	t.Run("owner is admitted as the configured role", func(t *testing.T) {
-		role, r := g.orgRole(t, iss.mint(t, assertion{sub: uniqueSub(t), workspace: "acme", role: "owner"}))
+	t.Run("an operator is admitted as the configured role", func(t *testing.T) {
+		role, r := g.orgRole(t, iss.mint(t, assertion{sub: uniqueSub(t), workspace: "platform", role: "owner"}))
 		if role != "Editor" {
 			t.Fatalf("role = %q (%d %s), want Editor", role, r.status, r.body)
 		}
@@ -318,26 +319,30 @@ func TestAdmission_DefaultPolicy(t *testing.T) {
 		name  string
 		token func() string
 	}{
-		{"editor", func() string { return iss.mint(t, assertion{sub: uniqueSub(t), workspace: "acme", role: "editor"}) }},
-		{"viewer", func() string { return iss.mint(t, assertion{sub: uniqueSub(t), workspace: "acme", role: "viewer"}) }},
+		// The case ADR 0077 exists for: an owner, but not an operator.
+		{"owner of a non-operator workspace", func() string {
+			return iss.mint(t, assertion{sub: uniqueSub(t), workspace: "acme", role: "owner"})
+		}},
+		{"editor", func() string { return iss.mint(t, assertion{sub: uniqueSub(t), workspace: "platform", role: "editor"}) }},
+		{"viewer", func() string { return iss.mint(t, assertion{sub: uniqueSub(t), workspace: "platform", role: "viewer"}) }},
 		{"no groups claim", func() string {
 			return iss.mint(t, assertion{sub: uniqueSub(t), groups: []string{}})
 		}},
 		{"groups claim of the wrong type", func() string {
 			return iss.mint(t, assertion{sub: uniqueSub(t), groups: "/workspaces/acme/owner"})
 		}},
-		{"owner, wrong audience (a token minted for another module)", func() string {
-			return iss.mint(t, assertion{sub: uniqueSub(t), workspace: "acme", role: "owner", aud: "logging"})
+		{"operator, wrong audience (a token minted for another module)", func() string {
+			return iss.mint(t, assertion{sub: uniqueSub(t), workspace: "platform", role: "owner", aud: "logging"})
 		}},
-		{"owner, wrong issuer", func() string {
-			return iss.mint(t, assertion{sub: uniqueSub(t), workspace: "acme", role: "owner", iss: "http://evil.example/iframe-identity"})
+		{"operator, wrong issuer", func() string {
+			return iss.mint(t, assertion{sub: uniqueSub(t), workspace: "platform", role: "owner", iss: "http://evil.example/iframe-identity"})
 		}},
-		{"owner, expired", func() string {
-			return iss.mint(t, assertion{sub: uniqueSub(t), workspace: "acme", role: "owner", ttl: -time.Minute})
+		{"operator, expired", func() string {
+			return iss.mint(t, assertion{sub: uniqueSub(t), workspace: "platform", role: "owner", ttl: -time.Minute})
 		}},
-		{"owner, signed by a key core doesn't hold", func() string {
+		{"operator, signed by a key core doesn't hold", func() string {
 			k, _ := rsa.GenerateKey(rand.Reader, 2048)
-			return iss.mint(t, assertion{sub: uniqueSub(t), workspace: "acme", role: "owner", key: k})
+			return iss.mint(t, assertion{sub: uniqueSub(t), workspace: "platform", role: "owner", key: k})
 		}},
 		{"no assertion at all (no anonymous access)", func() string { return "" }},
 	} {
@@ -351,10 +356,10 @@ func TestAdmission_DefaultPolicy(t *testing.T) {
 
 	t.Run("losing ownership locks an admitted person out on their next request", func(t *testing.T) {
 		sub := uniqueSub(t)
-		if role, r := g.orgRole(t, iss.mint(t, assertion{sub: sub, workspace: "acme", role: "owner"})); role != "Editor" {
+		if role, r := g.orgRole(t, iss.mint(t, assertion{sub: sub, workspace: "platform", role: "owner"})); role != "Editor" {
 			t.Fatalf("first login: %q %d %s", role, r.status, r.body)
 		}
-		if role, r := g.orgRole(t, iss.mint(t, assertion{sub: sub, workspace: "acme", role: "viewer"})); role != "" {
+		if role, r := g.orgRole(t, iss.mint(t, assertion{sub: sub, workspace: "platform", role: "viewer"})); role != "" {
 			t.Fatalf("demoted person still admitted as %q (%d)", role, r.status)
 		}
 	})
@@ -362,7 +367,7 @@ func TestAdmission_DefaultPolicy(t *testing.T) {
 	t.Run("an admitted person queries Loki through the provisioned data source", func(t *testing.T) {
 		mod := lokitest.UniqueModule(t)
 		lokitest.Push(t, lokiURL, map[string]string{"module": mod}, lokitest.Line{At: time.Now(), Text: "hello from " + mod})
-		token := iss.mint(t, assertion{sub: uniqueSub(t), workspace: "acme", role: "owner"})
+		token := iss.mint(t, assertion{sub: uniqueSub(t), workspace: "platform", role: "owner"})
 		q := map[string]any{
 			"from": "now-10m", "to": "now",
 			"queries": []any{map[string]any{"refId": "A", "datasource": map[string]string{"uid": "booth-loki"},
@@ -378,7 +383,7 @@ func TestAdmission_DefaultPolicy(t *testing.T) {
 	})
 
 	t.Run("an admitted person cannot reconfigure data sources or users", func(t *testing.T) {
-		token := iss.mint(t, assertion{sub: uniqueSub(t), workspace: "acme", role: "owner"})
+		token := iss.mint(t, assertion{sub: uniqueSub(t), workspace: "platform", role: "owner"})
 		if r := g.do(t, "POST", "/api/datasources", token, map[string]any{"name": "x", "type": "loki", "url": "http://169.254.169.254", "access": "proxy"}); r.status != 403 {
 			t.Errorf("creating a data source: %d %s, want 403", r.status, r.body)
 		}
@@ -415,7 +420,7 @@ func TestAdmission_Allowlist(t *testing.T) {
 	}{
 		{"platform", "owner", "Editor"},
 		{"ops", "owner", "Editor"},
-		{"acme", "owner", ""},      // an owner, but of a workspace not on the list
+		{"acme", "owner", ""},      // an owner, but not of an operator workspace (ADR 0077)
 		{"platform", "editor", ""}, // on the list, but not an owner
 		{"platformx", "owner", ""}, // near-miss slug
 		{"xplatform", "owner", ""},
@@ -445,10 +450,10 @@ func TestRoleAttributePath_Rendered(t *testing.T) {
 		}
 		return string(m[1])
 	}
-	if got := render("--set", "oidc.groupsClaim=memberships"); !strings.Contains(got, `"memberships"`) {
+	if got := render("--set", "access.workspaces={platform}", "--set", "oidc.groupsClaim=memberships"); !strings.Contains(got, `"memberships"`) {
 		t.Errorf("expression ignores oidc.groupsClaim: %s", got)
 	}
-	if got := render("--set", "access.workspaces={platform}"); strings.Contains(got, "ends_with") {
-		t.Errorf("allowlisted expression must match whole group strings, not suffixes: %s", got)
+	if got := render("--set", "access.workspaces={platform}"); strings.Contains(got, "ends_with") || strings.Contains(got, "starts_with") {
+		t.Errorf("the expression must match whole group strings of operator workspaces, never any owner: %s", got)
 	}
 }

@@ -57,14 +57,14 @@ export function LoggingApp({ workspace, role, theme, getAccessToken }: LoggingAp
       <div>
         <h2 className="text-lg font-semibold">Logs</h2>
         <p className="mt-0.5 text-sm text-slate-500 dark:text-slate-400">
-          Everything every module and pod writes to stdout and stderr, across the whole deployment.
+          What modules and pods write to stdout and stderr.
         </p>
       </div>
       {role === "owner" ? (
         <Viewer ctx={ctx} />
       ) : (
         <Banner tone="info">
-          Logs cover every workspace on this deployment, so only workspace owners can read them. Ask an owner if you need something from the logs.
+          Only workspace owners can read logs. Ask an owner if you need something from them.
         </Banner>
       )}
     </div>
@@ -122,6 +122,12 @@ function Viewer({ ctx }: { ctx: ApiContext }) {
 
   return (
     <>
+      {config.state.status === "ready" && config.state.data.scope === "workspace" && (
+        <Banner tone="info">
+          You're seeing logs from workspace <strong>{config.state.data.workspace}</strong>'s own pods only, such as its
+          notebook servers. Logs from shared platform services aren't included; your deployment's operators can read those.
+        </Banner>
+      )}
       <form
         className="flex flex-col gap-3 rounded-lg border border-slate-200 p-3 dark:border-slate-700"
         onSubmit={(e) => {

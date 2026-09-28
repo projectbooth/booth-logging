@@ -3,6 +3,13 @@
 Status: **ratified as built** — promoted to `booth-architecture` ADR 0067, which is the
 authoritative record. The longer-term operator-role question stays open there.
 
+**Amended by ADR 0077 (2026-09-28): the "open by default" part below no longer holds.** Owners
+outside `access.workspaces` now read only their own workspace's labelled pods; owners acting in
+an `access.workspaces` workspace ("operators") read everything; with no operators configured,
+nobody reads shared platform logs. The "per-workspace filtering isn't feasible" point below was
+wrong in one respect: platform-set pod labels, unlike log content, can be trusted. See
+[0008](0008-workspace-scoping.md). The original reasoning is kept below as written.
+
 ## The gap
 
 Every other module's data is scoped to a workspace (ADR 0008), and its access rules sit on

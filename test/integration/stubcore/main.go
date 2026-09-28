@@ -7,8 +7,10 @@
 //
 //	go run ./test/integration/stubcore -issuer http://stub-core.ns.svc.cluster.local:8080/iframe-identity -out DIR
 //
-// Writes DIR/openid-configuration, DIR/jwks.json, and DIR/<role>.jwt for owner/editor/viewer in
-// workspace "acme". Assertions live 30 minutes (core's live 2) so the run has time to use them.
+// Writes DIR/openid-configuration, DIR/jwks.json and three assertions (ADR 0077's cases):
+// operator.jwt (owner of the operator workspace "platform"), owner.jwt (owner of "acme", not an
+// operator) and editor.jwt (editor of "platform"). Assertions live 30 minutes (core's live 2) so
+// the run has time to use them.
 package main
 
 import (
@@ -63,17 +65,21 @@ func main() {
 		log.Fatal(err)
 	}
 	now := time.Now()
-	for _, role := range []string{"owner", "editor", "viewer"} {
+	for name, group := range map[string]string{
+		"operator": "/workspaces/platform/owner",
+		"owner":    "/workspaces/acme/owner",
+		"editor":   "/workspaces/platform/editor",
+	} {
 		jti := make([]byte, 8)
 		_, _ = rand.Read(jti)
 		tok, err := jwt.Signed(signer).Claims(jwt.Claims{
-			Issuer: iss, Subject: "it-" + role, Audience: jwt.Audience{*aud},
+			Issuer: iss, Subject: "it-" + name, Audience: jwt.Audience{*aud},
 			IssuedAt: jwt.NewNumericDate(now), NotBefore: jwt.NewNumericDate(now.Add(-time.Minute)),
 			Expiry: jwt.NewNumericDate(now.Add(30 * time.Minute)), ID: hex.EncodeToString(jti),
-		}).Claims(map[string]any{"groups": []string{"/workspaces/acme/" + role}, "booth_module": *aud}).Serialize()
+		}).Claims(map[string]any{"groups": []string{group}, "booth_module": *aud}).Serialize()
 		if err != nil {
 			log.Fatal(err)
 		}
-		write(role+".jwt", tok)
+		write(name+".jwt", tok)
 	}
 }

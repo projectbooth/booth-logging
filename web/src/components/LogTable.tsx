@@ -61,6 +61,7 @@ export function LogTable({ entries }: { entries: LogEntry[] }) {
                       ["Pod", e.pod],
                       ["Container", e.container],
                       ["Stream", e.stream],
+                      ["Workspace", e.workspace],
                     ] as const
                   )
                     .filter(([, v]) => v)

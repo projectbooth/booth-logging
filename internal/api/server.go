@@ -40,29 +40,63 @@ const (
 // fake as well as a real Loki.
 type Loki interface {
 	QueryRange(ctx context.Context, req loki.QueryRangeRequest) ([]loki.Entry, error)
-	LabelValues(ctx context.Context, label string, start, end time.Time) ([]string, error)
+	LabelValues(ctx context.Context, label string, start, end time.Time, selector string) ([]string, error)
 	Ready(ctx context.Context) error
 }
 
-// AccessPolicy decides who may read logs. Logs are cluster-wide, not workspace-scoped —
-// one booth-storage pod serves every workspace and its lines mention all of them — so a
-// workspace role alone can't scope what a caller sees. See docs/decisions/0002.
+// AccessPolicy decides who may read which logs (ADR 0067, as amended by ADR 0077). Logs are
+// cluster-wide, so a workspace role alone can't scope them; what can is the workspace label
+// the collector copies from a pod's booth.projectbooth.io/workspace label — Kubernetes
+// metadata set by the platform process that created the pod, never log content.
+//
+//   - operators — owners acting in one of Workspaces — read everything, labeled or not;
+//   - any other owner reads only lines whose workspace label is their active workspace (their
+//     workspace's own pods, e.g. notebook servers); shared module pods carry no such label and
+//     are invisible to them;
+//   - editors and viewers read nothing.
 type AccessPolicy struct {
-	// Workspaces, if non-empty, limits log access to owners of these workspaces (e.g. a
-	// dedicated "platform" workspace). Empty means an owner of any workspace may read all
-	// logs, which is only appropriate when every workspace owner is trusted operator staff.
+	// Workspaces lists the operator workspaces. Empty means there are no operators: every
+	// owner is scoped to their own workspace.
 	Workspaces []string
 }
 
-// Allows reports whether id may read logs, and if not, why.
-func (p AccessPolicy) Allows(id auth.Identity) (bool, string) {
+// Scope is what one caller may read: platform-wide, or one workspace's labeled streams. The
+// zero value is neither, and grants nothing (see pin) — so a handler that somehow ran without
+// requireAccess fails closed rather than open.
+type Scope struct {
+	Platform  bool
+	Workspace string
+}
+
+// Operator reports whether the scope is platform-wide.
+func (s Scope) Operator() bool { return s.Platform }
+
+// ScopeFor decides what id may read; ok is false (with a reason) if nothing.
+func (p AccessPolicy) ScopeFor(id auth.Identity) (scope Scope, ok bool, why string) {
 	if !id.IsOwner() {
-		return false, "reading logs requires the owner role in the active workspace"
+		return Scope{}, false, "reading logs requires the owner role in the active workspace"
 	}
-	if len(p.Workspaces) > 0 && !slices.Contains(p.Workspaces, id.Workspace) {
-		return false, "this deployment only lets owners of designated workspaces read logs; switch to one of them or ask your operator"
+	if slices.Contains(p.Workspaces, id.Workspace) {
+		return Scope{Platform: true}, true, ""
 	}
-	return true, ""
+	return Scope{Workspace: id.Workspace}, true, ""
+}
+
+type scopeKey struct{}
+
+func scopeFrom(ctx context.Context) Scope { s, _ := ctx.Value(scopeKey{}).(Scope); return s }
+
+// pin returns the workspace every query must be pinned to ("" for an operator), or ok=false
+// if the request carries no usable scope.
+func pin(ctx context.Context) (workspace string, ok bool) {
+	s := scopeFrom(ctx)
+	switch {
+	case s.Platform:
+		return "", true
+	case s.Workspace != "":
+		return s.Workspace, true
+	}
+	return "", false
 }
 
 // Deps is everything the router needs.
@@ -110,6 +144,8 @@ func NewRouter(d Deps) http.Handler {
 	return r
 }
 
+// requireAccess resolves the caller's Scope from the verified identity and attaches it to
+// the request; handlers read it from there and never from anything the client sent.
 func (s *server) requireAccess(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		id, ok := auth.FromContext(r.Context())
@@ -117,11 +153,12 @@ func (s *server) requireAccess(next http.Handler) http.Handler {
 			auth.WriteError(w, http.StatusUnauthorized, "no identity")
 			return
 		}
-		if allowed, why := s.Access.Allows(id); !allowed {
+		scope, allowed, why := s.Access.ScopeFor(id)
+		if !allowed {
 			auth.WriteError(w, http.StatusForbidden, why)
 			return
 		}
-		next.ServeHTTP(w, r)
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), scopeKey{}, scope)))
 	})
 }
 
@@ -141,9 +178,13 @@ type ConfigResponse struct {
 	MaxQueryRangeSeconds int64    `json:"maxQueryRangeSeconds"`
 	MaxLimit             int      `json:"maxLimit"`
 	Levels               []string `json:"levels"`
+	// Scope is "platform" for an operator, or "workspace" when every query is pinned to
+	// Workspace (ADR 0077) — so the UI can say what the caller is looking at.
+	Scope     string `json:"scope"`
+	Workspace string `json:"workspace,omitempty"`
 }
 
-func (s *server) handleConfig(w http.ResponseWriter, _ *http.Request) {
+func (s *server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	levels := make([]string, len(logql.Levels))
 	for i, l := range logql.Levels {
 		levels[i] = string(l)
@@ -153,7 +194,16 @@ func (s *server) handleConfig(w http.ResponseWriter, _ *http.Request) {
 		MaxQueryRangeSeconds: int64(s.MaxQueryRange / time.Second),
 		MaxLimit:             MaxLimit,
 		Levels:               levels,
+		Scope:                scopeName(scopeFrom(r.Context())),
+		Workspace:            scopeFrom(r.Context()).Workspace,
 	})
+}
+
+func scopeName(s Scope) string {
+	if s.Operator() {
+		return "platform"
+	}
+	return "workspace"
 }
 
 // handleModules lists module label values seen in [start, end); by default, the whole
@@ -164,7 +214,17 @@ func (s *server) handleModules(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	modules, err := s.Loki.LabelValues(r.Context(), logql.LabelModule, start, end)
+	// A scoped owner only learns module names from their own workspace's streams.
+	ws, ok := pin(r.Context())
+	if !ok {
+		auth.WriteError(w, http.StatusForbidden, "no access scope")
+		return
+	}
+	var selector string
+	if ws != "" {
+		selector = logql.Filter{Workspace: ws}.Query()
+	}
+	modules, err := s.Loki.LabelValues(r.Context(), logql.LabelModule, start, end, selector)
 	if err != nil {
 		writeLokiError(w, err)
 		return
@@ -186,6 +246,8 @@ type LogEntry struct {
 	Pod       string `json:"pod,omitempty"`
 	Container string `json:"container,omitempty"`
 	Stream    string `json:"stream,omitempty"`
+	// Workspace is the pod's workspace label, when it has one (ADR 0077).
+	Workspace string `json:"workspace,omitempty"`
 }
 
 // LogsResponse is GET /api/logs's body.
@@ -205,7 +267,13 @@ type LogsResponse struct {
 func (s *server) handleLogs(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 
-	filter := logql.Filter{Modules: q["module"], Search: q.Get("q")}
+	// The workspace pin comes from the verified identity (requireAccess), never the request.
+	ws, ok := pin(r.Context())
+	if !ok {
+		auth.WriteError(w, http.StatusForbidden, "no access scope")
+		return
+	}
+	filter := logql.Filter{Modules: q["module"], Search: q.Get("q"), Workspace: ws}
 	for _, raw := range q["level"] {
 		l, err := logql.ParseLevel(raw)
 		if err != nil {
@@ -254,6 +322,7 @@ func (s *server) handleLogs(w http.ResponseWriter, r *http.Request) {
 			Pod:       e.Labels[logql.LabelPod],
 			Container: e.Labels[logql.LabelContainer],
 			Stream:    e.Labels[logql.LabelStream],
+			Workspace: e.Labels[logql.LabelWorkspace],
 		})
 	}
 	// A full page means there may be more. (Lines sharing the exact nanosecond of the page

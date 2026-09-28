@@ -62,6 +62,7 @@ jobs:
             --set oidc.clientId=booth-logging-ci \
             --set oidc.requireAudience=false \
             --set grafana.identity.issuerUrl="$ISSUER" \
+            --set 'access.workspaces={platform}' \
             --wait --timeout 6m
 
       - name: Verify

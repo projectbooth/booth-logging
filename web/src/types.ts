@@ -15,6 +15,10 @@ export interface LoggingConfig {
   maxQueryRangeSeconds: number;
   maxLimit: number;
   levels: Level[];
+  /** "platform": an operator, reading everything. "workspace": every query is pinned
+   *  server-side to `workspace`'s own pods (ADR 0077). */
+  scope: "platform" | "workspace";
+  workspace?: string;
 }
 
 export interface LogEntry {
@@ -29,6 +33,8 @@ export interface LogEntry {
   pod?: string;
   container?: string;
   stream?: string;
+  /** The pod's workspace label, if it has one (ADR 0077). */
+  workspace?: string;
 }
 
 export interface LogsResponse {

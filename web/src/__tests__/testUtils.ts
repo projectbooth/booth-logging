@@ -69,4 +69,4 @@ export const entry = (over: Record<string, unknown> = {}) => ({
   ...over,
 });
 
-export const config = { retentionSeconds: 14 * 86400, maxQueryRangeSeconds: 14 * 86400, maxLimit: 1000, levels: ["error", "warn", "info", "debug", "unknown"] };
+export const config = { retentionSeconds: 14 * 86400, maxQueryRangeSeconds: 14 * 86400, maxLimit: 1000, levels: ["error", "warn", "info", "debug", "unknown"], scope: "platform" };
