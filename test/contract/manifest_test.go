@@ -414,6 +414,11 @@ func TestGrafana_Hardening(t *testing.T) {
 		"skip_org_role_sync = false",
 		"allow_assign_grafana_admin = false",
 		"allow_embedding = true",
+		// Grafana's background plugin installer stops a bundled plugin to update it, then can't
+		// replace its files on the read-only root: the Loki data source is left unregistered.
+		"preinstall_disabled = true",
+		"preinstall_auto_update = false",
+		"plugin_admin_enabled = false",
 		"root_url = %(protocol)s://%(domain)s/iframe/logging-grafana/",
 		"serve_from_sub_path = false",
 	} {

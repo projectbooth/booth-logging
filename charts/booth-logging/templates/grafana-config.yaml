@@ -75,6 +75,17 @@ data:
     allow_sign_up = false
     allow_org_create = false
 
+    [plugins]
+    ; Grafana 13 otherwise checks grafana.com at every start and (re)installs/updates its bundled
+    ; plugins in the background. On this read-only root filesystem an update can't replace the
+    ; plugin's files — but Grafana stops the running plugin first, so it's left unregistered.
+    ; Since grafana.com published loki 13.2.1 (~2026-09-29), every start tried to update Loki and
+    ; the Loki data source answered "plugin not registered" until the next restart. Nothing is
+    ; installed or updated at runtime: the image's bundled plugins are what runs.
+    preinstall_disabled = true
+    preinstall_auto_update = false
+    plugin_admin_enabled = false
+
     [analytics]
     reporting_enabled = false
     check_for_updates = false

@@ -98,6 +98,17 @@ analytics, update checks and Grafana Live are off. `root_url` is under
 before forwarding. That also keeps Grafana's own `/api/...` calls under the prefix and away
 from booth-core's `/api/`.
 
+**No runtime plugin installs (added 2026-10-06).** `[plugins] preinstall_disabled = true`,
+`preinstall_auto_update = false`, `plugin_admin_enabled = false`. Grafana 13's background
+installer otherwise contacts grafana.com at every start (about 18 requests) and updates bundled
+plugins that have newer releases. It stops the running plugin first, and on this read-only root it
+then can't replace the files, so the plugin stays unregistered. Once grafana.com published
+`loki` 13.2.1 (around 2026-09-29), every start stopped Loki about 1.6 s after Grafana began
+listening. From then on, Explore couldn't load the Loki plugin (`module.js` and settings returned 404),
+every query returned `404 plugin.notRegistered`, and the nightly Integration run failed at its
+Grafana-query step. `test/grafana` missed it because its query ran within that 1.6 s. It now
+waits past the window and fails if the installer logged anything at all.
+
 ## 6. NetworkPolicy: defense in depth, with an assumption about core's labels
 
 As ADR 0076 suggests, Grafana admits ingress only from pods labelled

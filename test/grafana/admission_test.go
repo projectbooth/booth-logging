@@ -140,7 +140,31 @@ func (i *issuer) mint(t *testing.T, a assertion) string {
 // ---- a real Grafana running the chart's rendered config -----------------------------------
 
 type grafana struct {
-	base string
+	base      string
+	container string
+}
+
+// installerQuietPeriod is how long after startup the test waits before checking that Grafana's
+// background plugin installer never ran. Unfixed, it acts within ~1.5 s of Grafana listening
+// (measured: Loki updated 13.2.0→13.2.1 and stopped 1.6 s after listen).
+const installerQuietPeriod = 5 * time.Second
+
+// assertNoPluginInstaller fails if Grafana's background plugin installer logged anything. On the
+// chart's read-only root it stops a bundled plugin to update it and can't replace its files,
+// leaving it unregistered — since grafana.com published loki 13.2.1, the Loki data source broke
+// ~1.6 s after every start, which a query made sooner than that never noticed.
+func (g *grafana) assertNoPluginInstaller(t *testing.T) {
+	t.Helper()
+	time.Sleep(installerQuietPeriod)
+	out, err := exec.Command("docker", "logs", g.container).CombinedOutput()
+	if err != nil {
+		t.Fatalf("docker logs: %v", err)
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.Contains(line, `"logger":"plugin.backgroundinstaller"`) || strings.Contains(line, `"logger":"plugin.installer"`) {
+			t.Fatalf("Grafana's plugin installer ran (it breaks bundled plugins on the read-only root): %s", line)
+		}
+	}
 }
 
 // startGrafana renders the chart with extra values and runs Grafana with exactly its
@@ -208,7 +232,7 @@ func startGrafana(t *testing.T, iss *issuer, extra ...string) *grafana {
 	if err != nil {
 		t.Fatal(err)
 	}
-	g := &grafana{base: "http://" + strings.TrimSpace(strings.Split(string(portOut), "\n")[0])}
+	g := &grafana{base: "http://" + strings.TrimSpace(strings.Split(string(portOut), "\n")[0]), container: name}
 
 	deadline := time.Now().Add(2 * time.Minute)
 	for {
@@ -365,6 +389,9 @@ func TestAdmission_OperatorsOnly(t *testing.T) {
 	})
 
 	t.Run("an admitted person queries Loki through the provisioned data source", func(t *testing.T) {
+		// After the window in which the installer would have broken the Loki plugin, so a broken
+		// plugin fails here rather than going unnoticed.
+		g.assertNoPluginInstaller(t)
 		mod := lokitest.UniqueModule(t)
 		lokitest.Push(t, lokiURL, map[string]string{"module": mod}, lokitest.Line{At: time.Now(), Text: "hello from " + mod})
 		token := iss.mint(t, assertion{sub: uniqueSub(t), workspace: "platform", role: "owner"})
