@@ -33,6 +33,26 @@ k() { kubectl $ctx "$@"; }
 fail() { echo "FAIL: $*" >&2; exit 1; }
 step() { echo "--- $*"; }
 
+# probe NAME LABELS COMMAND — run COMMAND (sh -c) in a one-off curl pod, wait for it to finish,
+# and print its output. Not `kubectl run --rm -i`: when the container exits before kubectl
+# attaches, that loses the output (the attach warning goes to stderr) and a passing check reads
+# as an empty failure — which is what failed Integration run 37541373382 at "API /healthz" while
+# the API and Loki were both healthy. Waiting for the pod's phase and then reading its logs
+# can't race.
+probe() {
+  local name=$1 labels=$2 cmd=$3 phase=""
+  k -n "$probe_ns" delete pod "$name" --ignore-not-found --wait >/dev/null 2>&1
+  k -n "$probe_ns" run "$name" --restart=Never --image=curlimages/curl ${labels:+--labels="$labels"} \
+    --command -- sh -c "$cmd" >/dev/null
+  for _ in $(seq 1 120); do
+    phase=$(k -n "$probe_ns" get pod "$name" -o jsonpath='{.status.phase}' 2>/dev/null)
+    case "$phase" in Succeeded|Failed) break ;; esac
+    sleep 1
+  done
+  k -n "$probe_ns" logs "pod/$name" 2>&1 || echo "(no logs; pod phase: ${phase:-unknown})"
+  k -n "$probe_ns" delete pod "$name" --wait=false >/dev/null 2>&1 || true
+}
+
 step "workloads ready"
 k -n "$ns" rollout status "daemonset/$release-collector" --timeout=180s
 k -n "$ns" rollout status "statefulset/$release-loki" --timeout=180s
@@ -143,16 +163,13 @@ step "the chart's own pods are filed under module=logging"
 curl -sfG "http://127.0.0.1:$lport/loki/api/v1/label/module/values" | jq -e '.data | index("logging")' >/dev/null || fail "module=logging missing"
 
 step "Loki is closed to other pods; the API reaches it"
-out=$(k -n "$probe_ns" run np-probe --rm -i --restart=Never --image=curlimages/curl -- \
-  sh -c "curl -s -m 5 -o /dev/null -w 'status=%{http_code}' http://$release-loki.$ns:3100/ready; echo \" exit=\$?\"" 2>/dev/null || true)
+out=$(probe np-probe "" "curl -s -m 5 -o /dev/null -w 'status=%{http_code}' http://$release-loki.$ns:3100/ready; echo \" exit=\$?\"")
 echo "$out" | grep -q "status=000" || fail "an unrelated pod reached Loki: $out"
-out=$(k -n "$probe_ns" run hz-probe --rm -i --restart=Never --image=curlimages/curl -- \
-  curl -s -w ' status=%{http_code}' "http://$release.$ns:8080/healthz" 2>/dev/null || true)
+out=$(probe hz-probe "" "curl -sS -m 10 -w ' status=%{http_code}' http://$release.$ns:8080/healthz")
 echo "$out" | grep -q 'status=200' || fail "API /healthz: $out"
 
 step "the API refuses unauthenticated requests"
-out=$(k -n "$probe_ns" run unauth-probe --rm -i --restart=Never --image=curlimages/curl -- \
-  curl -s -o /dev/null -w 'status=%{http_code}' "http://$release.$ns:8080/api/logs" 2>/dev/null || true)
+out=$(probe unauth-probe "" "curl -sS -m 10 -o /dev/null -w 'status=%{http_code}' http://$release.$ns:8080/api/logs")
 echo "$out" | grep -q 'status=401' || fail "unauthenticated /api/logs: $out"
 
 if [ -n "${GRAFANA_TOKENS:-}" ]; then
@@ -169,13 +186,11 @@ if [ -n "${GRAFANA_TOKENS:-}" ]; then
   editor=$(cat "$GRAFANA_TOKENS/editor.jwt")
   g="http://$release-grafana.$ns:3000"
   # The Grafana NetworkPolicy admits only booth-core's pods; these probes wear its label.
-  as_core() {
-    k -n "$probe_ns" run "$1" --rm -i --restart=Never --image=curlimages/curl \
-      --labels=app.kubernetes.io/name=booth-core -- sh -c "$2" 2>&1 || true
-  }
-  # A brand-new pod's first packets can be dropped while the NetworkPolicy controller catches
-  # up with its IP (seen on GitHub's kind runner, not locally), so retry connection-level
-  # failures. An HTTP response of any status is not retried, so a 401/403 still counts.
+  as_core() { probe "$1" app.kubernetes.io/name=booth-core "$2"; }
+  # Connection-level failures are retried (an HTTP response of any status is not, so a 401/403
+  # still counts). Added after an empty probe result on 2026-09-28 that was put down to
+  # NetworkPolicy timing; the empty output was more likely the kubectl attach race that probe()
+  # now avoids. Kept as cheap insurance, not as a known need.
   C="curl -sS -m 5 --retry 15 --retry-delay 2 --retry-all-errors"
 
   step "Grafana admits an operator as Editor"
@@ -196,7 +211,7 @@ if [ -n "${GRAFANA_TOKENS:-}" ]; then
   echo "$out" | grep -q "$marker plain" || fail "Grafana query didn't return the probe's lines: $(echo "$out" | head -c 400)"
 
   step "Grafana is closed to pods other than booth-core's"
-  out=$(k -n "$probe_ns" run g-stranger --rm -i --restart=Never --image=curlimages/curl --     sh -c "curl -s -m 5 -o /dev/null -w 'status=%{http_code}' $g/api/health; echo" 2>/dev/null || true)
+  out=$(probe g-stranger "" "curl -s -m 5 -o /dev/null -w 'status=%{http_code}' $g/api/health; echo")
   echo "$out" | grep -q "status=000" || fail "an unrelated pod reached Grafana: $out"
 fi
 
