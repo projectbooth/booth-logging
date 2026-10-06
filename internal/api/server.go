@@ -12,7 +12,6 @@ import (
 	"errors"
 	"net"
 	"net/http"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -44,22 +43,6 @@ type Loki interface {
 	Ready(ctx context.Context) error
 }
 
-// AccessPolicy decides who may read which logs (ADR 0067, as amended by ADR 0077). Logs are
-// cluster-wide, so a workspace role alone can't scope them; what can is the workspace label
-// the collector copies from a pod's booth.projectbooth.io/workspace label — Kubernetes
-// metadata set by the platform process that created the pod, never log content.
-//
-//   - operators — owners acting in one of Workspaces — read everything, labeled or not;
-//   - any other owner reads only lines whose workspace label is their active workspace (their
-//     workspace's own pods, e.g. notebook servers); shared module pods carry no such label and
-//     are invisible to them;
-//   - editors and viewers read nothing.
-type AccessPolicy struct {
-	// Workspaces lists the operator workspaces. Empty means there are no operators: every
-	// owner is scoped to their own workspace.
-	Workspaces []string
-}
-
 // Scope is what one caller may read: platform-wide, or one workspace's labeled streams. The
 // zero value is neither, and grants nothing (see pin) — so a handler that somehow ran without
 // requireAccess fails closed rather than open.
@@ -71,13 +54,24 @@ type Scope struct {
 // Operator reports whether the scope is platform-wide.
 func (s Scope) Operator() bool { return s.Platform }
 
-// ScopeFor decides what id may read; ok is false (with a reason) if nothing.
-func (p AccessPolicy) ScopeFor(id auth.Identity) (scope Scope, ok bool, why string) {
-	if !id.IsOwner() {
-		return Scope{}, false, "reading logs requires the owner role in the active workspace"
-	}
-	if slices.Contains(p.Workspaces, id.Workspace) {
+// ScopeFor decides what id may read (ADR 0067 as amended by ADR 0077; operators identified per
+// ADR 0094); ok is false (with a reason) if nothing. Logs are cluster-wide, so a workspace role
+// alone can't scope them; what can is the workspace label the collector copies from a pod's
+// booth.projectbooth.io/workspace label — Kubernetes metadata set by the platform process that
+// created the pod, never log content.
+//
+//   - a platform operator (/platform/operator in the verified token) reads everything, labeled
+//     or not, whatever their role in the active workspace;
+//   - any other owner reads only lines whose workspace label is their active workspace (their
+//     workspace's own pods, e.g. notebook servers); shared module pods carry no such label and
+//     are invisible to them;
+//   - editors and viewers read nothing.
+func ScopeFor(id auth.Identity) (scope Scope, ok bool, why string) {
+	if id.PlatformOperator {
 		return Scope{Platform: true}, true, ""
+	}
+	if !id.IsOwner() {
+		return Scope{}, false, "reading logs requires the owner role in the active workspace, or platform operator"
 	}
 	return Scope{Workspace: id.Workspace}, true, ""
 }
@@ -103,7 +97,6 @@ func pin(ctx context.Context) (workspace string, ok bool) {
 type Deps struct {
 	Verifier auth.TokenVerifier
 	Loki     Loki
-	Access   AccessPolicy
 	// Retention is how long Loki keeps logs (the chart's loki.retentionDays). Reported to
 	// the UI, and the default window for listing modules.
 	Retention time.Duration
@@ -153,7 +146,7 @@ func (s *server) requireAccess(next http.Handler) http.Handler {
 			auth.WriteError(w, http.StatusUnauthorized, "no identity")
 			return
 		}
-		scope, allowed, why := s.Access.ScopeFor(id)
+		scope, allowed, why := ScopeFor(id)
 		if !allowed {
 			auth.WriteError(w, http.StatusForbidden, why)
 			return

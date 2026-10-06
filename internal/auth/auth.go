@@ -1,5 +1,5 @@
 // Package auth is booth-storage's internal/auth, copied verbatim apart from the role helpers
-// at the bottom: the same token verification, second-issuer support (ADR 0056) and
+// at the bottom and Identity.PlatformOperator (ADR 0094): the same token verification, second-issuer support (ADR 0056) and
 // token-derived role (ADR 0041) every module must implement. There is no shared Go module
 // for this across booth-* repos, so a fix to one copy should be mirrored in the other.
 //
@@ -233,6 +233,24 @@ type Identity struct {
 	Subject   string
 	Workspace string
 	Role      Role
+	// PlatformOperator is ADR 0094's workspace-independent operator role: the verified token's
+	// groups claim contains exactly PlatformOperatorGroup. A property of the person, not of the
+	// workspace they're acting in, and read from the token only — there is no header for it.
+	PlatformOperator bool
+}
+
+// PlatformOperatorGroup is the groups-claim entry that makes a caller a platform operator
+// (ADR 0094, amending ADR 0025's grammar). Matched as an exact string.
+const PlatformOperatorGroup = "/platform/operator"
+
+// IsPlatformOperator reports whether groups contains PlatformOperatorGroup exactly.
+func IsPlatformOperator(groups []string) bool {
+	for _, g := range groups {
+		if g == PlatformOperatorGroup {
+			return true
+		}
+	}
+	return false
 }
 
 // IsOwner reports whether the caller holds the owner role in the active workspace. It is
@@ -289,9 +307,10 @@ func Middleware(verifier TokenVerifier) func(http.Handler) http.Handler {
 				return
 			}
 			next.ServeHTTP(w, r.WithContext(WithIdentity(r.Context(), Identity{
-				Subject:   claims.Subject,
-				Workspace: workspace,
-				Role:      EffectiveRole(forwarded, granted),
+				Subject:          claims.Subject,
+				Workspace:        workspace,
+				Role:             EffectiveRole(forwarded, granted),
+				PlatformOperator: IsPlatformOperator(claims.Groups),
 			})))
 		})
 	}

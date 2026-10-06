@@ -25,11 +25,12 @@ on merge to `main` and nightly. It deploys the chart into a kind cluster and run
   - the `fetch-jwks` init container fetched the stub's keys and Grafana became ready;
   - the `logging-grafana` BoothModule registered as `iframe-proxy` while `logging` stayed
     `native`;
-  - an operator's (an owner of `platform`, the chart's `access.workspaces` here) signed
-    assertion is admitted as `Editor` and queries the probe pod's lines from the real Loki
-    (proving Loki's NetworkPolicy admits Grafana);
-  - a non-operator owner's assertion (owner of `acme`) and an editor's are refused outright
-    (ADR 0077);
+  - a platform operator's signed assertion (groups holding `/platform/operator`, ADR 0094; the
+    stub mints the shape core will once ADR 0094's amendment ships) is admitted as `Editor` and
+    queries the probe pod's lines from the real Loki (proving Loki's NetworkPolicy admits
+    Grafana);
+  - an owner's assertion without the claim (exactly what core mints today) and an editor's are
+    refused outright;
   - a pod not labelled as booth-core can't reach Grafana at all.
 
 ## Where it has actually run

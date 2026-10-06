@@ -26,10 +26,15 @@ func (f fakeVerifier) Verify(_ context.Context, raw string) (*auth.Claims, error
 }
 
 var tokens = fakeVerifier{
-	"owner-acme":     {Subject: "alice", Groups: []string{"/workspaces/acme/owner"}},
-	"editor-acme":    {Subject: "bob", Groups: []string{"/workspaces/acme/editor"}},
-	"viewer-acme":    {Subject: "carol", Groups: []string{"/workspaces/acme/viewer"}},
-	"owner-platform": {Subject: "ops", Groups: []string{"/workspaces/platform/owner", "/workspaces/acme/viewer"}},
+	"owner-acme":  {Subject: "alice", Groups: []string{"/workspaces/acme/owner"}},
+	"editor-acme": {Subject: "bob", Groups: []string{"/workspaces/acme/editor"}},
+	"viewer-acme": {Subject: "carol", Groups: []string{"/workspaces/acme/viewer"}},
+	// ADR 0094: platform operators, by the /platform/operator claim — one who is only a viewer
+	// in acme, and one who is also acme's owner.
+	"operator-viewer-acme": {Subject: "ops", Groups: []string{"/workspaces/acme/viewer", "/platform/operator"}},
+	"operator-owner-acme":  {Subject: "ops2", Groups: []string{"/workspaces/acme/owner", "/platform/operator"}},
+	// ADR 0067's stopgap shape: an owner of a "platform" workspace. No longer an operator.
+	"owner-platform": {Subject: "old", Groups: []string{"/workspaces/platform/owner"}},
 }
 
 // recordingLoki records requests and returns canned results.
@@ -62,13 +67,10 @@ func (r *recordingLoki) LabelValues(_ context.Context, _ string, start, end time
 
 func (r *recordingLoki) Ready(context.Context) error { return r.readyErr }
 
-// operators makes owner-acme an operator, for tests about filter handling rather than scope.
-var operators = AccessPolicy{Workspaces: []string{"acme"}}
-
 var fixedNow = time.Date(2026, 9, 22, 12, 0, 0, 0, time.UTC)
 
-func newTestServer(l Loki, access AccessPolicy) http.Handler {
-	return NewRouter(Deps{Verifier: tokens, Loki: l, Access: access, Retention: 14 * 24 * time.Hour, Now: func() time.Time { return fixedNow }})
+func newTestServer(l Loki) http.Handler {
+	return NewRouter(Deps{Verifier: tokens, Loki: l, Retention: 14 * 24 * time.Hour, Now: func() time.Time { return fixedNow }})
 }
 
 func do(t *testing.T, h http.Handler, token, workspace, target string, headers ...string) *httptest.ResponseRecorder {
@@ -98,37 +100,34 @@ func decode[T any](t *testing.T, rec *httptest.ResponseRecorder) T {
 }
 
 func TestAccess(t *testing.T) {
-	open := newTestServer(&recordingLoki{}, AccessPolicy{})
-	restricted := newTestServer(&recordingLoki{}, AccessPolicy{Workspaces: []string{"platform"}})
-
+	h := newTestServer(&recordingLoki{})
 	cases := []struct {
-		name      string
-		h         http.Handler
-		token, ws string
-		headers   []string
-		want      int
+		name, token, ws string
+		headers         []string
+		want            int
 	}{
-		{"no token", open, "", "acme", nil, 401},
-		{"bad token", open, "forged", "acme", nil, 401},
-		{"no workspace header", open, "owner-acme", "", nil, 400},
-		{"owner", open, "owner-acme", "acme", nil, 200},
-		{"editor refused", open, "editor-acme", "acme", nil, 403},
-		{"viewer refused", open, "viewer-acme", "acme", nil, 403},
-		{"no role in that workspace", open, "owner-acme", "globex", nil, 403},
+		{"no token", "", "acme", nil, 401},
+		{"bad token", "forged", "acme", nil, 401},
+		{"no workspace header", "owner-acme", "", nil, 400},
+		{"owner", "owner-acme", "acme", nil, 200},
+		{"editor refused", "editor-acme", "acme", nil, 403},
+		{"viewer refused", "viewer-acme", "acme", nil, 403},
+		{"no role in that workspace", "owner-acme", "globex", nil, 403},
 		// ADR 0041: a forged role header can't lift a viewer to owner...
-		{"viewer with forged owner header", open, "viewer-acme", "acme", []string{auth.HeaderBoothRole, "owner"}, 403},
+		{"viewer with forged owner header", "viewer-acme", "acme", []string{auth.HeaderBoothRole, "owner"}, 403},
 		// ...and the gateway narrowing an owner's role is honoured.
-		{"owner narrowed by gateway", open, "owner-acme", "acme", []string{auth.HeaderBoothRole, "viewer"}, 403},
-		// ADR 0077: an owner outside the operator list is admitted, scoped to their workspace
-		// (TestScope checks the scoping itself).
-		{"restricted: owner of an undesignated workspace", restricted, "owner-acme", "acme", nil, 200},
-		{"restricted: owner of the designated workspace", restricted, "owner-platform", "platform", nil, 200},
-		{"restricted: operator acting in a workspace where they're only a viewer", restricted, "owner-platform", "acme", nil, 403},
+		{"owner narrowed by gateway", "owner-acme", "acme", []string{auth.HeaderBoothRole, "viewer"}, 403},
+		// ADR 0094: an operator is admitted whatever their role in the active workspace...
+		{"platform operator who is only a viewer here", "operator-viewer-acme", "acme", nil, 200},
+		// ...but still needs a workspace context their token grants some role in.
+		{"platform operator in a workspace they have no role in", "operator-viewer-acme", "globex", nil, 403},
+		// ADR 0067's stopgap shape grants nothing special any more: just an ordinary owner.
+		{"owner of a workspace named platform", "owner-platform", "platform", nil, 200},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			for _, path := range []string{"/api/logs", "/api/modules", "/api/config"} {
-				if rec := do(t, tc.h, tc.token, tc.ws, path, tc.headers...); rec.Code != tc.want {
+				if rec := do(t, h, tc.token, tc.ws, path, tc.headers...); rec.Code != tc.want {
 					t.Errorf("%s: status %d, want %d (%s)", path, rec.Code, tc.want, rec.Body)
 				}
 			}
@@ -138,7 +137,7 @@ func TestAccess(t *testing.T) {
 
 func TestHealth(t *testing.T) {
 	l := &recordingLoki{}
-	h := newTestServer(l, AccessPolicy{})
+	h := newTestServer(l)
 	if rec := do(t, h, "", "", "/healthz"); rec.Code != 200 {
 		t.Errorf("healthz with Loki ready: %d", rec.Code)
 	}
@@ -154,10 +153,10 @@ func TestHealth(t *testing.T) {
 
 func TestLogs_BuildsQueryFromFilters(t *testing.T) {
 	l := &recordingLoki{}
-	h := newTestServer(l, operators) // platform-wide: this is about filters, not scoping (TestScope)
+	h := newTestServer(l) // an operator's query: this is about filters, not scoping (TestScope)
 	q := url.Values{"module": {"storage", "catalog"}, "level": {"error", "WARN"}, "q": {"db down"}, "limit": {"50"},
 		"start": {"2026-09-22T10:00:00Z"}, "end": {"1790078400000000000"}}
-	rec := do(t, h, "owner-acme", "acme", "/api/logs?"+q.Encode())
+	rec := do(t, h, "operator-owner-acme", "acme", "/api/logs?"+q.Encode())
 	if rec.Code != 200 {
 		t.Fatalf("%d %s", rec.Code, rec.Body)
 	}
@@ -176,8 +175,8 @@ func TestLogs_BuildsQueryFromFilters(t *testing.T) {
 
 func TestLogs_Defaults(t *testing.T) {
 	l := &recordingLoki{}
-	h := newTestServer(l, operators) // platform-wide: this is about filters, not scoping (TestScope)
-	if rec := do(t, h, "owner-acme", "acme", "/api/logs"); rec.Code != 200 {
+	h := newTestServer(l) // an operator's query: this is about filters, not scoping (TestScope)
+	if rec := do(t, h, "operator-owner-acme", "acme", "/api/logs"); rec.Code != 200 {
 		t.Fatal(rec.Body)
 	}
 	got := l.queries[0]
@@ -185,14 +184,14 @@ func TestLogs_Defaults(t *testing.T) {
 		t.Errorf("defaults = %+v", got)
 	}
 	// Only an end: a one-hour window ending there.
-	do(t, h, "owner-acme", "acme", "/api/logs?end=2026-09-01T00:00:00Z")
+	do(t, h, "operator-owner-acme", "acme", "/api/logs?end=2026-09-01T00:00:00Z")
 	if got := l.queries[1]; got.End.Sub(got.Start) != time.Hour {
 		t.Errorf("end-only window = %v", got.End.Sub(got.Start))
 	}
 }
 
 func TestLogs_Validation(t *testing.T) {
-	h := newTestServer(&recordingLoki{}, AccessPolicy{})
+	h := newTestServer(&recordingLoki{})
 	for _, target := range []string{
 		"/api/logs?level=verbose",
 		`/api/logs?module=` + url.QueryEscape(`storage"}`),
@@ -222,7 +221,7 @@ func TestLogs_ResponseAndCursor(t *testing.T) {
 		{Timestamp: 2_000_000_000, Line: "b", Labels: map[string]string{"module": "storage"}},
 		{Timestamp: 1_000_000_000, Line: "a", Labels: map[string]string{"module": "storage", "detected_level": "trace"}},
 	}}
-	h := newTestServer(l, AccessPolicy{})
+	h := newTestServer(l)
 
 	resp := decode[LogsResponse](t, do(t, h, "owner-acme", "acme", "/api/logs?limit=2"))
 	if len(resp.Entries) != 2 || resp.NextCursor != "2000000000" {
@@ -253,7 +252,7 @@ func TestLogs_LokiFailures(t *testing.T) {
 		"unreachable":    {errors.New("dial tcp: connection refused"), 503},
 	} {
 		t.Run(name, func(t *testing.T) {
-			rec := do(t, newTestServer(&recordingLoki{err: tc.err}, AccessPolicy{}), "owner-acme", "acme", "/api/logs")
+			rec := do(t, newTestServer(&recordingLoki{err: tc.err}), "owner-acme", "acme", "/api/logs")
 			if rec.Code != tc.want {
 				t.Errorf("status %d, want %d", rec.Code, tc.want)
 			}
@@ -266,7 +265,7 @@ func TestLogs_LokiFailures(t *testing.T) {
 
 func TestModules(t *testing.T) {
 	l := &recordingLoki{labels: []string{"catalog", "storage"}}
-	h := newTestServer(l, AccessPolicy{})
+	h := newTestServer(l)
 	rec := do(t, h, "owner-acme", "acme", "/api/modules")
 	if rec.Code != 200 || rec.Body.String() != `{"modules":["catalog","storage"]}`+"\n" {
 		t.Fatalf("%d %s", rec.Code, rec.Body)
@@ -288,27 +287,23 @@ func TestConfig(t *testing.T) {
 	}
 }
 
-// ADR 0077: operators (owners acting in an access.workspaces workspace) query platform-wide;
-// every other owner's queries are pinned to their active workspace — from the verified
-// identity, whatever the request says.
+// ADR 0077 with ADR 0094's operators: a platform operator queries platform-wide; every other
+// owner's queries are pinned to their active workspace — from the verified identity, whatever
+// the request says.
 func TestScope(t *testing.T) {
-	tokens["owner-acme-and-platform"] = &auth.Claims{Subject: "dana", Groups: []string{"/workspaces/acme/owner", "/workspaces/platform/owner"}}
-	t.Cleanup(func() { delete(tokens, "owner-acme-and-platform") })
-
 	for _, tc := range []struct {
 		name, token, ws string
-		access          AccessPolicy
 		wantPin         string // "" = platform-wide
 		wantScope       string
 	}{
-		{"no operators configured: every owner is scoped", "owner-acme", "acme", AccessPolicy{}, "acme", "workspace"},
-		{"owner outside the operator list is scoped", "owner-acme", "acme", AccessPolicy{Workspaces: []string{"platform"}}, "acme", "workspace"},
-		{"operator is platform-wide", "owner-platform", "platform", AccessPolicy{Workspaces: []string{"platform"}}, "", "platform"},
-		{"the same person is scoped when acting in their other workspace", "owner-acme-and-platform", "acme", AccessPolicy{Workspaces: []string{"platform"}}, "acme", "workspace"},
+		{"an owner is scoped to their workspace", "owner-acme", "acme", "acme", "workspace"},
+		{"ADR 0067's old operator shape is just a scoped owner now", "owner-platform", "platform", "platform", "workspace"},
+		{"a platform operator is platform-wide", "operator-viewer-acme", "acme", "", "platform"},
+		{"a platform operator who is also an owner is platform-wide", "operator-owner-acme", "acme", "", "platform"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			l := &recordingLoki{labels: []string{"notebooks"}}
-			h := newTestServer(l, tc.access)
+			h := newTestServer(l)
 
 			// A client-supplied workspace parameter or matcher is ignored, not honoured.
 			if rec := do(t, h, tc.token, tc.ws, "/api/logs?workspace=globex&module=notebooks"); rec.Code != 200 {

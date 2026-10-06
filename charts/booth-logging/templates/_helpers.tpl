@@ -68,17 +68,14 @@ be truncated without anyone noticing.
 {{- end -}}
 
 {{/*
-access.workspaces, validated: every entry must be an ADR 0025 workspace slug. The list feeds both
-the API's allowlist and the Grafana admission expression below, where an unvalidated value would
-be spliced into a JMESPath string literal.
+Refuses a leftover access.workspaces (or any access.*) value. ADR 0094 replaced that chart-value
+operator list with the /platform/operator groups claim; silently ignoring an old value would
+leave an operator wondering why their allowlist stopped working.
 */}}
-{{- define "booth-logging.accessWorkspaces" -}}
-{{- range .Values.access.workspaces -}}
-{{- if not (regexMatch "^[a-z0-9-]+$" (toString .)) -}}
-{{- fail (printf "access.workspaces entries must be workspace slugs matching ^[a-z0-9-]+$ (got %q)" (toString .)) -}}
+{{- define "booth-logging.validate" -}}
+{{- if .Values.access -}}
+{{- fail "access.workspaces was removed (ADR 0094): platform operators are now identified by the /platform/operator entry in their token's groups claim, granted in the identity provider. Remove access.* from your values." -}}
 {{- end -}}
-{{- end -}}
-{{- join "," .Values.access.workspaces -}}
 {{- end -}}
 
 {{- define "booth-logging.grafanaName" -}}
@@ -86,35 +83,27 @@ be spliced into a JMESPath string literal.
 {{- end -}}
 
 {{/*
-Whether the Grafana view is deployed at all: grafana.enabled AND at least one operator workspace
-in access.workspaces. ADR 0077 admits operators only, so with no operators nobody could ever use
-it — rather than register a nav entry that refuses everyone, nothing is rendered.
+Whether the Grafana view is deployed: grafana.enabled. (Before ADR 0094 it also needed a
+configured operator list; operators are now a token claim, which the chart can't see, so
+Grafana is deployed whenever it's enabled and admits whoever holds the claim.)
 */}}
 {{- define "booth-logging.grafanaActive" -}}
-{{- if and .Values.grafana.enabled .Values.access.workspaces -}}true{{- end -}}
+{{- if .Values.grafana.enabled -}}true{{- end -}}
 {{- end -}}
 
 {{/*
-The Grafana view's admission gate (ADR 0076, as amended by ADR 0077: operators only), as a
-JMESPath expression for [auth.jwt] role_attribute_path. It evaluates to the one role every
-admitted person gets (grafana.admittedRole) or to '' — and with role_attribute_strict = true,
-'' refuses the login outright. There is no third outcome: nobody is admitted at a lower role.
+The Grafana view's admission gate (ADR 0076; operators only per ADR 0077; operators identified
+per ADR 0094), as a JMESPath expression for [auth.jwt] role_attribute_path. It evaluates to the
+one role every admitted person gets (grafana.admittedRole) or to '' — and with
+role_attribute_strict = true, '' refuses the login outright. There is no third outcome: nobody
+is admitted at a lower role.
 
-The claims are core's X-Booth-Identity assertion (ADR 0069), whose groups claim carries exactly
-one entry, the ACTIVE workspace's "/workspaces/<ws>/<role>" (ADR 0025). Admitted iff that entry
-is "/workspaces/<operator workspace>/owner" — an owner acting in one of access.workspaces. Any
-other owner is refused: Grafana runs arbitrary LogQL, which can't be pinned to one workspace.
-Whole-string matches, so a near-miss slug never matches. An absent or malformed groups claim is
-treated as [] (refused), never an evaluation error.
+Admitted iff the assertion's groups claim contains exactly "/platform/operator". Grafana only
+ever sees core's X-Booth-Identity assertion (ADR 0069), never the caller's own token, so this
+works only once booth-core carries that entry into the assertion (ADR 0094's amendment; tracked
+on booth-core's brief). Until then nobody is admitted — fail-closed, as the gate always was. An
+absent or malformed groups claim is treated as [] (refused), never an evaluation error.
 */}}
 {{- define "booth-logging.grafanaRoleAttributePath" -}}
-{{- if not .Values.access.workspaces -}}
-{{- fail "internal: the Grafana admission expression needs at least one operator workspace" -}}
-{{- end -}}
-{{- $groups := printf "(\"%s\" || `[]`)" .Values.oidc.groupsClaim -}}
-{{- $checks := list -}}
-{{- range (splitList "," (include "booth-logging.accessWorkspaces" .)) -}}
-{{- $checks = append $checks (printf "contains(%s, '/workspaces/%s/owner')" $groups .) -}}
-{{- end -}}
-{{- printf "(%s) && '%s' || ''" (join " || " $checks) .Values.grafana.admittedRole -}}
+{{- printf "contains((\"%s\" || `[]`), '/platform/operator') && '%s' || ''" .Values.oidc.groupsClaim .Values.grafana.admittedRole -}}
 {{- end -}}

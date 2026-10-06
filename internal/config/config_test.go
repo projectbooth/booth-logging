@@ -1,7 +1,6 @@
 package config
 
 import (
-	"slices"
 	"testing"
 	"time"
 )
@@ -21,7 +20,7 @@ func TestLoad_Defaults(t *testing.T) {
 	if cfg.Retention != 14*24*time.Hour {
 		t.Errorf("Retention = %v, want 336h (the documented v0 default)", cfg.Retention)
 	}
-	if cfg.MaxQueryRange != 0 || cfg.AccessWorkspaces != nil || cfg.HTTPAddr != ":8080" || cfg.OIDC.GroupsClaim != "groups" {
+	if cfg.MaxQueryRange != 0 || cfg.HTTPAddr != ":8080" || cfg.OIDC.GroupsClaim != "groups" {
 		t.Errorf("unexpected defaults: %+v", cfg)
 	}
 }
@@ -30,16 +29,12 @@ func TestLoad_Overrides(t *testing.T) {
 	setRequired(t)
 	t.Setenv("BOOTH_LOGGING_RETENTION", "168h")
 	t.Setenv("BOOTH_LOGGING_MAX_QUERY_RANGE", "24h")
-	t.Setenv("BOOTH_LOGGING_ACCESS_WORKSPACES", " platform , ,ops")
 	cfg, err := Load()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if cfg.Retention != 168*time.Hour || cfg.MaxQueryRange != 24*time.Hour {
 		t.Errorf("durations = %v / %v", cfg.Retention, cfg.MaxQueryRange)
-	}
-	if !slices.Equal(cfg.AccessWorkspaces, []string{"platform", "ops"}) {
-		t.Errorf("AccessWorkspaces = %q", cfg.AccessWorkspaces)
 	}
 }
 

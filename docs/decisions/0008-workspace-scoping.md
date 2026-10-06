@@ -5,8 +5,9 @@ policy. This records how it was built and the judgment calls it left to this mod
 
 ## The rule
 
-- **Operators** are owners acting in an `access.workspaces` workspace. They read every line,
-  platform-wide.
+- **Operators** are anyone whose verified token's groups claim holds `/platform/operator`
+  (ADR 0094; before that, owners acting in an `access.workspaces` workspace). They read every
+  line, platform-wide, whatever their role in the active workspace.
 - **Every other owner** reads only lines whose `workspace` label is their active workspace. The
   pin is added server-side from the verified identity, never from the request.
 - **Editors and viewers** read nothing.
@@ -55,14 +56,11 @@ only one able to change it.
 
 ## Judgment calls
 
-1. **With no operators, Grafana isn't deployed at all.** ADR 0077 says nobody gets Grafana
-   then. Rather than deploy one whose nav entry refuses everyone, the chart renders no Grafana
-   workload, no `logging-grafana` registration and no Grafana NetworkPolicy unless
-   `grafana.enabled` is true *and* `access.workspaces` is non-empty. NOTES.txt says so when
-   Grafana is enabled but not deployed. Easy to reverse if you'd rather always register it.
-2. **Default install behaviour changed.** With `access.workspaces: []` (still the default), no
-   one sees shared-module logs any more; before ADR 0077, every owner saw everything. That
-   follows directly from 0077, but operators upgrading will notice, and the startup log says so.
+1. ~~With no operators, Grafana isn't deployed at all.~~ Superseded by ADR 0094: the chart can
+   no longer see who's an operator, so Grafana is deployed whenever it's enabled.
+2. **Default install behaviour changed.** With no operators (now: nobody holding
+   `/platform/operator`), no one sees shared-module logs; before ADR 0077, every owner saw
+   everything. The startup log says how operators are identified.
 3. **The UI says what a scoped owner is seeing.** `/api/config` now reports `scope`
    (`platform` or `workspace`) and the workspace. The viewer shows scoped owners a notice that
    they see only their workspace's own pods, and that shared platform services aren't included.
@@ -74,3 +72,29 @@ only one able to change it.
 - **Nothing here has run behind a real booth-core, shell and booth-notebooks.** The scoping was
   checked against real Loki, a real cluster and real pod labels, but not with a real notebook
   pod spawned by the real hub.
+
+## ADR 0094: operators from the `/platform/operator` claim (2026-09-30)
+
+- **Identification.** `internal/auth` sets `Identity.PlatformOperator` when the verified token's
+  groups claim contains exactly `/platform/operator`. It's read from the token only; no header
+  can set it. An operator still needs a workspace context their token grants some role in (the
+  gateway requires one); their role there doesn't matter. ADR 0067's old shape (an owner of a
+  workspace named e.g. `platform`) grants nothing special any more. Everything else in this
+  record is unchanged.
+- **The chart value is gone.** `access.workspaces` and `BOOTH_LOGGING_ACCESS_WORKSPACES` are
+  removed. A leftover `access.*` value **fails the render** with a migration message, rather
+  than being silently ignored, so an upgrade surfaces it (checked on kind: a values-reusing
+  upgrade of a release that had it set is refused). A leftover env var only logs a warning.
+- **The default stays ADR 0077's**, not ADR 0067's "open with a warning" (which ADR 0094's text
+  and this repo's brief still describe). A claim check has no configuration to detect "nobody
+  qualifies" from, and ADR 0077 had already replaced that default.
+- **Grafana** admits `contains(groups, '/platform/operator')`, strict, fail-closed. booth-core's
+  `X-Booth-Identity` doesn't carry that entry yet (ADR 0094's amendment; booth-core's brief), so
+  nobody is admitted until it does. `test/grafana` checks that today's core assertion shape (a
+  workspace owner without the claim) is refused, and that only the exact string admits. The
+  integration stub mints the future shape on purpose.
+- **Grafana's plugin installer.** This work first ran into Grafana 13's background plugin
+  installer breaking the Loki data source on the read-only root. The fix and its root cause (the
+  installer updating Loki 13.2.0 to 13.2.1 from grafana.com) landed separately on `main`
+  (`11d57f2`, see [0007](0007-grafana-view-implementation.md) section 5), and this migration builds
+  on it.

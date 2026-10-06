@@ -9,6 +9,11 @@ a real mismatch between ADR 0076's wording and what Grafana accepts.
 `access.workspaces` workspace), and isn't deployed at all when there are none. Items 2 and 4
 below are updated accordingly; see also [0008](0008-workspace-scoping.md).
 
+**Amended by ADR 0094 (2026-09-30):** an operator is now whoever's assertion holds
+`/platform/operator`, and Grafana is deployed whenever `grafana.enabled` (no operator list to
+wait for). booth-core's `X-Booth-Identity` doesn't carry that entry yet (ADR 0094's amendment,
+tracked on booth-core's brief), so **nobody is admitted until it does** — fail-closed, as ruled.
+
 ## 1. Grafana reads core's keys from a file, not `jwk_set_url` (deviation from ADR 0076's wording)
 
 ADR 0076 (and this task) said to point Grafana's `jwk_set_url` at core's iframe-identity JWKS.
@@ -49,13 +54,12 @@ rediscover this.
 ## 2. The admission gate: `role_attribute_path` + `role_attribute_strict`, verified by breaking it
 
 The gate is ADR 0076's first suggestion, not a pre-auth proxy. The chart renders a JMESPath
-expression from the same `access.workspaces` and `oidc.groupsClaim` values the native viewer
-uses. Since ADR 0077 it admits only a whole-string match of `/workspaces/<operator
-workspace>/owner`; there's no "any owner" form any more. It evaluates to `grafana.admittedRole`
-or `''`. With `role_attribute_strict = true`,
-`''` refuses the login, and role sync runs on every request (`skip_org_role_sync = false`).
-`access.workspaces` entries are now validated as workspace slugs, because they're spliced into
-that expression.
+expression using the same `oidc.groupsClaim` value as the native viewer. Since ADR 0094 it
+admits only an exact `/platform/operator` entry; there's no workspace-shaped form any more.
+(Before that it was built from `access.workspaces`, whose entries were validated as slugs
+because they were spliced into it.) It evaluates to `grafana.admittedRole` or `''`. With
+`role_attribute_strict = true`, `''` refuses the login, and role sync runs on every request
+(`skip_org_role_sync = false`).
 
 `test/grafana` runs the real Grafana 13.2.2 with the chart's exact rendered `grafana.ini`, the
 chart's read-only root filesystem, the real test Loki, and assertions signed like core's.
@@ -81,13 +85,12 @@ reading admin settings are refused. The Loki data source is provisioned `editabl
 can save dashboards, but Grafana's state is an `emptyDir`, so they're lost when the pod
 restarts.
 
-## 4. Enabled by default, but deployed only with operators
+## 4. Enabled by default
 
-`grafana.enabled: true`. Since ADR 0077, Grafana is actually deployed (workload, registration
-and nav entry) only when `access.workspaces` names at least one operator workspace, and only
-those operators are admitted. A default install, which has no operators, therefore has no
-Grafana view. The earlier concern (any owner running arbitrary LogQL out of the box) no longer
-applies.
+`grafana.enabled: true`. Since ADR 0094 the chart can't know whether any operators exist (it's a
+token claim), so Grafana is deployed whenever it's enabled, and admits only `/platform/operator`
+holders. Until booth-core forwards that claim, it admits nobody; NOTES.txt and the fetch-jwks
+init container's log say so.
 
 ## 5. Everything else Grafana could be entered by is off
 

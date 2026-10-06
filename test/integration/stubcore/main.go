@@ -7,10 +7,14 @@
 //
 //	go run ./test/integration/stubcore -issuer http://stub-core.ns.svc.cluster.local:8080/iframe-identity -out DIR
 //
-// Writes DIR/openid-configuration, DIR/jwks.json and three assertions (ADR 0077's cases):
-// operator.jwt (owner of the operator workspace "platform"), owner.jwt (owner of "acme", not an
-// operator) and editor.jwt (editor of "platform"). Assertions live 30 minutes (core's live 2) so
-// the run has time to use them.
+// Writes DIR/openid-configuration, DIR/jwks.json and three assertions:
+//   - operator.jwt: a viewer of "acme" who holds /platform/operator (ADR 0094). This is the
+//     shape booth-core will mint once ADR 0094's amendment ships; today's core never includes
+//     /platform/operator, so this stub is ahead of core on purpose.
+//   - owner.jwt: owner of "acme", no /platform/operator — exactly what core mints today.
+//   - editor.jwt: editor of "acme".
+//
+// Assertions live 30 minutes (core's live 2) so the run has time to use them.
 package main
 
 import (
@@ -65,10 +69,10 @@ func main() {
 		log.Fatal(err)
 	}
 	now := time.Now()
-	for name, group := range map[string]string{
-		"operator": "/workspaces/platform/owner",
-		"owner":    "/workspaces/acme/owner",
-		"editor":   "/workspaces/platform/editor",
+	for name, groups := range map[string][]string{
+		"operator": {"/workspaces/acme/viewer", "/platform/operator"},
+		"owner":    {"/workspaces/acme/owner"},
+		"editor":   {"/workspaces/acme/editor"},
 	} {
 		jti := make([]byte, 8)
 		_, _ = rand.Read(jti)
@@ -76,7 +80,7 @@ func main() {
 			Issuer: iss, Subject: "it-" + name, Audience: jwt.Audience{*aud},
 			IssuedAt: jwt.NewNumericDate(now), NotBefore: jwt.NewNumericDate(now.Add(-time.Minute)),
 			Expiry: jwt.NewNumericDate(now.Add(30 * time.Minute)), ID: hex.EncodeToString(jti),
-		}).Claims(map[string]any{"groups": []string{group}, "booth_module": *aud}).Serialize()
+		}).Claims(map[string]any{"groups": groups, "booth_module": *aud}).Serialize()
 		if err != nil {
 			log.Fatal(err)
 		}

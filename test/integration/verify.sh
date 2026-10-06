@@ -18,11 +18,12 @@
 #      workspace in JSON and logfmt: labels come from pod metadata, never from log content;
 #   6. if GRAFANA_TOKENS names a directory written by test/integration/stubcore (and the chart was
 #      installed with grafana.identity.issuerUrl pointing at the stub-core Service it serves —
-#      see integration.yml, which also sets access.workspaces={platform}), the Grafana view
-#      (ADR 0076, operators only per ADR 0077): its init container fetched the stub's keys, the
-#      logging-grafana BoothModule registered, an operator's signed assertion is admitted as
-#      Editor and can query the real Loki, a non-operator owner's and an editor's are refused
-#      outright, and Grafana is unreachable from a pod that isn't booth-core's gateway.
+#      see integration.yml), the Grafana view (ADR 0076; operators only, ADR 0077; operators hold
+#      /platform/operator, ADR 0094): its init container fetched the stub's keys, the
+#      logging-grafana BoothModule registered, a platform operator's signed assertion is admitted
+#      as Editor and can query the real Loki, an owner without the claim (what core mints today)
+#      and an editor are refused outright, and Grafana is unreachable from a pod that isn't
+#      booth-core's gateway.
 set -euo pipefail
 
 ctx=${KUBE_CONTEXT:+--context "$KUBE_CONTEXT"}
@@ -193,13 +194,13 @@ if [ -n "${GRAFANA_TOKENS:-}" ]; then
   # now avoids. Kept as cheap insurance, not as a known need.
   C="curl -sS -m 5 --retry 15 --retry-delay 2 --retry-all-errors"
 
-  step "Grafana admits an operator as Editor"
+  step "Grafana admits a platform operator (/platform/operator) as Editor"
   out=$(as_core g-operator "$C -H 'X-Booth-Identity: $operator' $g/api/user/orgs")
   echo "$out" | grep -q '"role":"Editor"' || fail "operator not admitted as Editor: $out"
 
-  step "Grafana refuses a non-operator owner outright (ADR 0077)"
+  step "Grafana refuses an owner without /platform/operator outright (ADR 0077/0094)"
   out=$(as_core g-owner "$C -o /dev/null -w 'status=%{http_code}' -H 'X-Booth-Identity: $owner' $g/api/user/orgs")
-  echo "$out" | grep -qE 'status=40[13]' || fail "non-operator owner not refused: $out"
+  echo "$out" | grep -qE 'status=40[13]' || fail "owner without /platform/operator not refused: $out"
 
   step "Grafana refuses an editor outright"
   out=$(as_core g-editor "$C -o /dev/null -w 'status=%{http_code}' -H 'X-Booth-Identity: $editor' $g/api/user/orgs")

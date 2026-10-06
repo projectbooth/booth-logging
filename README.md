@@ -3,10 +3,11 @@
 Project Booth's logging module (nav group **Manage**). Every pod on the cluster writes to
 stdout/stderr as usual. A node-level collector ships all of it to **Grafana Loki**, and a
 native viewer lets workspace owners browse, filter and search it by module, time range and
-severity (ADR 0015, ADR 0022). Operators see everything; every other owner sees only their own
-workspace's pods (ADR 0077). A full **Grafana** view (ADR 0076), for operators only, is
-registered next to it as a second module, `logging-grafana`. Modules integrate nothing: there is no SDK, no ingestion
-API and no configuration. Brief: `../booth-architecture/agent-briefs/logging.md`.
+severity (ADR 0015, ADR 0022). Platform operators (`/platform/operator`, ADR 0094) see
+everything; every other owner sees only their own workspace's pods (ADR 0077). A full
+**Grafana** view (ADR 0076), for operators only, is registered next to it as a second module,
+`logging-grafana`. Modules integrate nothing: there is no SDK, no ingestion API and no
+configuration. Brief: `../booth-architecture/agent-briefs/logging.md`.
 
 ## What v0 delivers
 
@@ -49,11 +50,12 @@ API and no configuration. Brief: `../booth-architecture/agent-briefs/logging.md`
 
 ## The Grafana view (ADR 0076)
 
-> **Operators only (ADR 0077).** Anyone admitted can run **arbitrary LogQL over every
-> tenant's logs**, which can't be pinned to one workspace. So only owners acting in an
-> `access.workspaces` workspace are admitted, and every other owner is refused outright. With
-> no operators configured (the default), the Grafana view isn't deployed at all. Turn it off
-> with `grafana.enabled=false`.
+> **Platform operators only (ADR 0077, ADR 0094).** Anyone admitted can run **arbitrary LogQL
+> over every tenant's logs**, which can't be pinned to one workspace. So only assertions whose
+> groups hold `/platform/operator` are admitted; everyone else is refused outright.
+> **Until booth-core carries that entry into its `X-Booth-Identity` assertion (ADR 0094's
+> amendment), nobody is admitted.** That's expected, not broken. Turn the view off with
+> `grafana.enabled=false`.
 
 - **Registration:** a second `BoothModule`: `id: logging-grafana`,
   `uiIntegrationMode: iframe-proxy`, `navPath: /logging-grafana`, `navGroup: manage`, with its
@@ -69,10 +71,10 @@ API and no configuration. Brief: `../booth-architecture/agent-briefs/logging.md`
   `grafana.identity.issuerUrl` must equal core's iframe-identity issuer **exactly**; the init
   container refuses to start Grafana otherwise, naming both spellings. If core's key is ever
   regenerated, Grafana refuses everyone until `kubectl rollout restart deploy/<release>-grafana`.
-- **Admission** is binary (ADR 0077). An owner acting in an `access.workspaces` workspace is
-  admitted as `Editor`, which is what Explore needs. Everyone else, including owners of other
-  workspaces, is refused outright, never admitted at a lower role. Role sync runs on every
-  request, so losing ownership takes effect immediately. Editors can't change
+- **Admission** is binary (ADR 0077, ADR 0094). A holder of `/platform/operator` is admitted as
+  `Editor`, which is what Explore needs. Everyone else, including workspace owners, is refused
+  outright, never admitted at a lower role. Role sync runs on every request, so losing the claim
+  takes effect immediately. Editors can't change
   data sources, users or settings.
 - **Loki data source** is provisioned read-only at this release's Loki. Loki's NetworkPolicy
   admits Grafana. Grafana's own NetworkPolicy admits only booth-core's pods, as defense in
@@ -81,8 +83,9 @@ API and no configuration. Brief: `../booth-architecture/agent-briefs/logging.md`
 ## API
 
 Reached through core's gateway at `/modules/logging/api/...`. Needs `Authorization: Bearer …`
-and `X-Workspace`. **Owner role only.** An operator (an owner acting in an `access.workspaces`
-workspace) queries platform-wide. Every other owner's queries are pinned server-side to
+and `X-Workspace`. A **platform operator** (`/platform/operator` in the verified token, ADR 0094,
+whatever their role in the active workspace) queries platform-wide. Otherwise **owner role
+only**. Every other owner's queries are pinned server-side to
 `workspace="<active workspace>"`, from the verified identity, whatever the request says
 ([0008](docs/decisions/0008-workspace-scoping.md)). Errors are `{"error", "field"?}`.
 
@@ -150,12 +153,13 @@ register it: `registerNativeModule("logging", LoggingApp)`.
 
 ## Read before deploying
 
-- **Access** (ADR 0067 as amended by ADR 0077, [0008](docs/decisions/0008-workspace-scoping.md)):
-  `access.workspaces` names the **operator** workspaces, whose owners read everything and get
-  the Grafana view. Every other owner reads only their own workspace's labelled pods (notebook
-  servers today). With the default `[]` there are **no operators**: nobody can read shared
-  platform logs (core, storage, catalog, …) and Grafana isn't deployed. Name one, e.g.
-  `[platform]`.
+- **Access** (ADR 0067 as amended by ADR 0077; operators per ADR 0094;
+  [0008](docs/decisions/0008-workspace-scoping.md)): nothing to configure in this chart.
+  **Platform operators** are whoever the identity provider grants the `/platform/operator`
+  group; they read everything and get the Grafana view. Every other owner reads only their own
+  workspace's labelled pods (notebook servers today). If nobody holds the group, nobody can read
+  shared platform logs (core, storage, catalog, …). The old `access.workspaces` value was
+  removed, and the chart refuses it if it's still set.
 - **Workspace labels are an access boundary.** A pod labelled
   `booth.projectbooth.io/workspace: <ws>` is readable by that workspace's owners. Only the
   platform process that creates such pods should be able to set or change that label. Never put
