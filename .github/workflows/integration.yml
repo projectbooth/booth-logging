@@ -21,7 +21,7 @@ permissions:
 
 jobs:
   kind-deploy:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
@@ -89,7 +89,7 @@ jobs:
     # booth-core is public, so it's checked out and built at a pinned commit (not its moving
     # branch, contracts/testing-strategy.md); bump CORE_REF deliberately. 264856f is the first
     # core that carries /platform/operator into X-Booth-Identity.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       CORE_REF: 264856f7872e7831888a1d7add15d91e4f75619c
     steps:
