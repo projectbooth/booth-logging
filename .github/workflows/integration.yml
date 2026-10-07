@@ -109,6 +109,9 @@ jobs:
 
       - name: Build and load booth-core and booth-logging images
         run: |
+          # dependency build (not update) installs exactly what core's Chart.lock pins; it needs the
+          # chart repository registered first.
+          helm repo add nats https://nats-io.github.io/k8s/helm/charts/
           helm dependency build booth-core/charts/booth-core
           docker build -t booth-core:ci booth-core
           docker build -t booth-logging:ci .
