@@ -21,9 +21,15 @@
 #      see integration.yml), the Grafana view (ADR 0076; operators only, ADR 0077; operators hold
 #      /platform/operator, ADR 0094): its init container fetched the stub's keys, the
 #      logging-grafana BoothModule registered, a platform operator's signed assertion is admitted
-#      as Editor and can query the real Loki, an owner without the claim (what core mints today)
-#      and an editor are refused outright, and Grafana is unreachable from a pod that isn't
-#      booth-core's gateway.
+#      as Editor and can query the real Loki, an owner without the claim and an editor are refused
+#      outright, and Grafana is unreachable from a pod that isn't booth-core's gateway;
+#   7. if REAL_CORE=1 (installed by test/integration/realcore/deploy.sh: a real booth-core built
+#      from source and a real Keycloak), the same Grafana admission end to end through booth-core
+#      itself — a real password-grant token, core's iframe-url endpoint, the iframe session cookie,
+#      core's iframe proxy minting X-Booth-Identity (ADR 0069/0094) and Grafana verifying it: an
+#      owner whose token carries /platform/operator is admitted, an owner without it is refused,
+#      and owners holding near-miss groups (/platform/operators, /platform/operator/readonly) are
+#      refused.
 set -euo pipefail
 
 ctx=${KUBE_CONTEXT:+--context "$KUBE_CONTEXT"}
@@ -214,6 +220,53 @@ if [ -n "${GRAFANA_TOKENS:-}" ]; then
   step "Grafana is closed to pods other than booth-core's"
   out=$(probe g-stranger "" "curl -s -m 5 -o /dev/null -w 'status=%{http_code}' $g/api/health; echo")
   echo "$out" | grep -q "status=000" || fail "an unrelated pod reached Grafana: $out"
+fi
+
+if [ "${REAL_CORE:-}" = 1 ]; then
+  step "real booth-core: Grafana admission through core's own iframe proxy (ADR 0069/0094)"
+  core_sha=$(k -n booth-system get deploy booth-core -o jsonpath='{.spec.template.spec.containers[0].image}')
+  echo "booth-core image: $core_sha"
+  password=$(k -n keycloak get secret realcore-test-password -o jsonpath='{.data.password}' | base64 -d)
+  # Runs as plain sh in one curl pod (no jq there, hence sed). For each user: a real password-grant
+  # token from Keycloak, core's iframe-url for logging-grafana, the iframe entry (which sets the
+  # booth_iframe_session cookie), then Grafana's /api/user/orgs THROUGH core's iframe proxy — so core
+  # mints X-Booth-Identity from the real token's groups and Grafana verifies it against core's keys.
+  # Prints one line per user: "<user> status=<code> <body>". Retries while core is still picking up
+  # the logging-grafana registration (404/502/503 from core rather than an answer from Grafana).
+  read -r -d '' rc_script <<'SH' || true
+KC=http://keycloak.keycloak.svc:8080
+CORE=http://booth-core.booth-system.svc:8080
+WS=acme-analytics
+orgs() {
+  tok=$(curl -s -X POST "$KC/realms/booth/protocol/openid-connect/token" \
+    -d grant_type=password -d client_id=booth-design -d "username=$1" -d "password=$PW" \
+    | sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p')
+  [ -n "$tok" ] || { echo "status=notoken"; return; }
+  url=$(curl -s -H "Authorization: Bearer $tok" -H "X-Workspace: $WS" "$CORE/api/modules/logging-grafana/iframe-url" \
+    | sed -n 's/.*"url":"\([^"]*\)".*/\1/p')
+  [ -n "$url" ] || { echo "status=nourl"; return; }
+  cookie=$(curl -s -o /dev/null -D - "$CORE$url" | tr -d '\r' \
+    | sed -n 's/^[Ss]et-[Cc]ookie: booth_iframe_session=\([^;]*\).*/\1/p')
+  [ -n "$cookie" ] || { echo "status=nocookie"; return; }
+  # Body flattened to one line (Grafana's error bodies end in a newline), then the status.
+  code=$(curl -s -o /tmp/orgs -w '%{http_code}' -H "Cookie: booth_iframe_session=$cookie" "$CORE/iframe/logging-grafana/api/user/orgs")
+  echo "$(tr -d '\r\n' </tmp/orgs) status=$code"
+}
+for i in $(seq 1 30); do
+  r=$(orgs operator-user)
+  case "$r" in *status=404|*status=502|*status=503|*status=no*) sleep 3 ;; *) break ;; esac
+done
+echo "operator-user $r"
+for u in owner-user nearmiss-plural-user nearmiss-child-user; do echo "$u $(orgs $u)"; done
+SH
+  out=$(probe rc-grafana "" "PW='$password'; $rc_script")
+  echo "$out" | sed 's/^/    /'
+  line() { echo "$out" | grep "^$1 " | head -1; }
+  line operator-user | grep -q '"role":"Editor".* status=200' ||
+    fail "real core: owner with /platform/operator not admitted as Editor: $(line operator-user)"
+  for u in owner-user nearmiss-plural-user nearmiss-child-user; do
+    line "$u" | grep -qE 'status=40[13]$' || fail "real core: $u not refused outright: $(line "$u")"
+  done
 fi
 
 echo "PASS"
