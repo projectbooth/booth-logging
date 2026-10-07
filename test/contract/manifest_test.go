@@ -318,10 +318,7 @@ func TestChart_AccessAndAuthEnv(t *testing.T) {
 	if !regexp.MustCompile(`BOOTH_OIDC_GROUPS_CLAIM\s+value: "groups"`).Match(dep) {
 		t.Error("groups claim should default to booth-core's \"groups\"")
 	}
-	dep = helmTemplate(t, "templates/deployment.yaml", "--set", "access.workspaces={platform,ops}", "--set", "queryMaxRange=24h")
-	if !regexp.MustCompile(`BOOTH_LOGGING_ACCESS_WORKSPACES\s+value: "platform,ops"`).Match(dep) {
-		t.Errorf("access.workspaces not rendered:\n%s", dep)
-	}
+	dep = helmTemplate(t, "templates/deployment.yaml", "--set", "queryMaxRange=24h")
 	if !regexp.MustCompile(`BOOTH_LOGGING_MAX_QUERY_RANGE\s+value: "24h"`).Match(dep) {
 		t.Error("queryMaxRange not rendered")
 	}
@@ -334,12 +331,6 @@ func TestChart_AccessAndAuthEnv(t *testing.T) {
 }
 
 // ---- the Grafana view (ADR 0076, as amended by ADR 0077) ----------------------------------------
-
-// withOps configures an operator workspace: the Grafana view exists only when there is one
-// (ADR 0077 admits operators only).
-var withOps = []string{"--set", "access.workspaces={platform}"}
-
-func ops(extra ...string) []string { return append(append([]string{}, withOps...), extra...) }
 
 func renderGrafanaModule(t *testing.T, extra ...string) (boothModule, bool) {
 	t.Helper()
@@ -362,7 +353,7 @@ func renderGrafanaModule(t *testing.T, extra ...string) (boothModule, bool) {
 // A second registration from this chart (module-manifest.md's multi-surface pattern), beside
 // the unchanged `logging` one.
 func TestGrafana_SecondRegistration(t *testing.T) {
-	m, ok := renderGrafanaModule(t, withOps...)
+	m, ok := renderGrafanaModule(t)
 	if !ok {
 		t.Fatal("no logging-grafana BoothModule rendered")
 	}
@@ -378,7 +369,7 @@ func TestGrafana_SecondRegistration(t *testing.T) {
 	if m.Spec.Events != nil || m.Spec.Database != nil || m.Spec.WorkloadIdentity != nil {
 		t.Error("the Grafana registration declares capabilities it doesn't use")
 	}
-	dep := helmTemplate(t, "templates/grafana.yaml", withOps...)
+	dep := helmTemplate(t, "templates/grafana.yaml")
 	if !regexp.MustCompile(`readinessProbe:\s+httpGet:\s+path: ` + regexp.QuoteMeta(m.Spec.HealthCheckPath) + `\b`).Match(dep) {
 		t.Errorf("Grafana readinessProbe doesn't use healthCheckPath %q", m.Spec.HealthCheckPath)
 	}
@@ -393,7 +384,7 @@ func grafanaINI(t *testing.T, extra ...string) string {
 	var cm struct {
 		Data map[string]string `yaml:"data"`
 	}
-	if err := yaml.Unmarshal(helmTemplate(t, "templates/grafana-config.yaml", ops(extra...)...), &cm); err != nil {
+	if err := yaml.Unmarshal(helmTemplate(t, "templates/grafana-config.yaml", extra...), &cm); err != nil {
 		t.Fatal(err)
 	}
 	return cm.Data["grafana.ini"]
@@ -439,14 +430,14 @@ func TestGrafana_IssuerAndDataSourceWiring(t *testing.T) {
 	if !strings.Contains(ini, `"iss": "`+iss+`"`) {
 		t.Errorf("expect_claims iss not %q (trailing slash must be trimmed):\n%s", iss, ini)
 	}
-	dep := string(helmTemplate(t, "templates/grafana.yaml", ops("--set", "grafana.identity.issuerUrl="+iss+"/")...))
+	dep := string(helmTemplate(t, "templates/grafana.yaml", "--set", "grafana.identity.issuerUrl="+iss+"/"))
 	if !strings.Contains(dep, "- -issuer="+iss+"\n") || !strings.Contains(dep, "- fetch-jwks") {
 		t.Errorf("init container not fetching keys for %q:\n%s", iss, dep)
 	}
 	var cm struct {
 		Data map[string]string `yaml:"data"`
 	}
-	_ = yaml.Unmarshal(helmTemplate(t, "templates/grafana-config.yaml", withOps...), &cm)
+	_ = yaml.Unmarshal(helmTemplate(t, "templates/grafana-config.yaml"), &cm)
 	ds := cm.Data["datasources.yaml"]
 	if !strings.Contains(ds, "url: http://booth-logging-loki:3100") || !strings.Contains(ds, "editable: false") {
 		t.Errorf("datasources.yaml:\n%s", ds)
@@ -457,12 +448,11 @@ func TestGrafana_Validation(t *testing.T) {
 	needHelm(t)
 	for _, tc := range []struct{ set, want string }{
 		{"grafana.admittedRole=Admin", "grafana.admittedRole must be Viewer or Editor"},
-		{"access.workspaces={Platform_1}", "access.workspaces entries must be workspace slugs"},
-		{"access.workspaces={a'b}", "access.workspaces entries must be workspace slugs"},
+		// ADR 0094: the old operator list is refused, not silently ignored.
+		{"access.workspaces={platform}", "access.workspaces was removed (ADR 0094)"},
 		{"grafana.identity.issuerUrl=", "grafana.identity.issuerUrl is required"},
 	} {
-		// The case's own --set goes last, so it wins over withOps.
-		args := append(append([]string{"template", "x", chartDir}, ops(requiredValues...)...), "--set", tc.set)
+		args := append(append([]string{"template", "x", chartDir}, requiredValues...), "--set", tc.set)
 		out, err := exec.Command("helm", args...).CombinedOutput()
 		if err == nil || !bytes.Contains(out, []byte(tc.want)) {
 			t.Errorf("%s: want failure %q, got: %s", tc.set, tc.want, out)
@@ -473,7 +463,7 @@ func TestGrafana_Validation(t *testing.T) {
 // Loki admits Grafana; Grafana admits only core's gateway (defense in depth, ADR 0076).
 func TestGrafana_NetworkPolicies(t *testing.T) {
 	var loki, graf map[string]any
-	for _, d := range docs(t, helmTemplate(t, "templates/networkpolicy.yaml", withOps...)) {
+	for _, d := range docs(t, helmTemplate(t, "templates/networkpolicy.yaml")) {
 		switch d["metadata"].(map[string]any)["name"] {
 		case "booth-logging-loki":
 			loki = d
@@ -496,43 +486,41 @@ func TestGrafana_NetworkPolicies(t *testing.T) {
 	}
 }
 
-// No Grafana at all when it's disabled — or when there are no operators to admit (ADR 0077):
-// no workload, no registration (so no nav entry that refuses everyone), no NetworkPolicy, and
-// Loki's policy doesn't admit it.
-func TestGrafana_AbsentWithoutOperatorsOrWhenDisabled(t *testing.T) {
-	for name, extra := range map[string][]string{
-		"disabled":                   ops("--set", "grafana.enabled=false"),
-		"no operators (the default)": nil,
-		"explicitly no operators":    {"--set", "access.workspaces=null"},
-	} {
-		t.Run(name, func(t *testing.T) {
-			if _, ok := renderGrafanaModule(t, extra...); ok {
-				t.Error("logging-grafana registered")
-			}
-			all := string(helmTemplate(t, "", extra...))
-			for _, gone := range []string{"booth-logging-grafana", "app.kubernetes.io/component: grafana"} {
-				if strings.Contains(all, gone) {
-					t.Errorf("%q still rendered", gone)
-				}
-			}
-			if m := renderBoothModule(t); m.Spec.ID != "logging" {
-				t.Errorf("native registration missing: %+v", m.Spec)
-			}
-		})
+// ADR 0094: operators are a token claim the chart can't see, so Grafana is deployed whenever
+// it's enabled — and nothing of it renders when it isn't.
+func TestGrafana_DeployedWhenEnabled(t *testing.T) {
+	if _, ok := renderGrafanaModule(t); !ok {
+		t.Error("logging-grafana not registered by default")
+	}
+	off := []string{"--set", "grafana.enabled=false"}
+	if _, ok := renderGrafanaModule(t, off...); ok {
+		t.Error("logging-grafana registered with grafana.enabled=false")
+	}
+	all := string(helmTemplate(t, "", off...))
+	for _, gone := range []string{"booth-logging-grafana", "app.kubernetes.io/component: grafana"} {
+		if strings.Contains(all, gone) {
+			t.Errorf("%q still rendered with grafana.enabled=false", gone)
+		}
+	}
+	if m := renderBoothModule(t); m.Spec.ID != "logging" {
+		t.Errorf("native registration missing: %+v", m.Spec)
 	}
 }
 
-// ADR 0077: Grafana admits operators only — the expression lists exactly the operator
-// workspaces' owner groups, whole-string, and has no "any owner" form.
-func TestGrafana_AdmitsOperatorsOnly(t *testing.T) {
-	ini := grafanaINI(t, "--set", "access.workspaces={platform,ops}")
+// ADR 0077 + ADR 0094: Grafana admits exactly the holders of /platform/operator — no workspace
+// allowlist, no "any owner" form.
+func TestGrafana_AdmitsPlatformOperatorsOnly(t *testing.T) {
+	ini := grafanaINI(t)
 	m := regexp.MustCompile(`role_attribute_path = (.*)`).FindStringSubmatch(ini)
 	if m == nil {
 		t.Fatal("no role_attribute_path")
 	}
-	want := "(contains((\"groups\" || `[]`), '/workspaces/platform/owner') || contains((\"groups\" || `[]`), '/workspaces/ops/owner')) && 'Editor' || ''"
+	want := "contains((\"groups\" || `[]`), '/platform/operator') && 'Editor' || ''"
 	if m[1] != want {
 		t.Errorf("role_attribute_path =\n %s\nwant\n %s", m[1], want)
+	}
+	if got := grafanaINI(t, "--set", "oidc.groupsClaim=memberships"); !strings.Contains(got, `contains(("memberships" || `+"`[]`"+`), '/platform/operator')`) {
+		t.Errorf("expression ignores oidc.groupsClaim:\n%s", got)
 	}
 }
 
@@ -561,5 +549,24 @@ func TestCollector_WorkspaceLabelFromPodMetadataOnly(t *testing.T) {
 	}
 	if strings.Join(stages, ",") != "stage.cri,stage.label_drop" {
 		t.Errorf("loki.process stages = %v; only stage.cri and stage.label_drop are allowed (no stage may turn line content into labels)", stages)
+	}
+}
+
+// ADR 0094: nothing about operators is configured in the chart any more.
+func TestChart_NoOperatorAllowlist(t *testing.T) {
+	all := string(helmTemplate(t, ""))
+	if strings.Contains(all, "BOOTH_LOGGING_ACCESS_WORKSPACES") {
+		t.Error("the removed operator allowlist is still rendered")
+	}
+	raw, err := os.ReadFile(filepath.Join(chartDir, "values.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var v map[string]any
+	if err := yaml.Unmarshal(raw, &v); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := v["access"]; ok {
+		t.Error("values.yaml still defines access")
 	}
 }

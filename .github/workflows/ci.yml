@@ -112,12 +112,11 @@ jobs:
           helm lint charts/booth-logging \
             --set oidc.issuerUrl=https://keycloak.example.com/realms/booth \
             --set oidc.clientId=booth-logging
-      - name: helm lint (restricted access, 7-day retention, no persistence, no NetworkPolicy)
+      - name: helm lint (7-day retention, no persistence, no NetworkPolicy)
         run: |
           helm lint charts/booth-logging \
             --set oidc.issuerUrl=https://keycloak.example.com/realms/booth \
             --set oidc.clientId=booth-logging \
-            --set 'access.workspaces={platform}' \
             --set loki.retentionDays=7 \
             --set loki.persistence.enabled=false \
             --set networkPolicy.enabled=false

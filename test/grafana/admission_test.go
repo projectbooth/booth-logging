@@ -94,7 +94,8 @@ func newIssuer(t *testing.T) *issuer {
 type assertion struct {
 	sub, workspace, role string
 	aud, iss             string
-	groups               any // overrides the groups claim when non-nil
+	groups               any  // overrides the groups claim when non-nil
+	operator             bool // adds /platform/operator, as core will once ADR 0094's amendment ships
 	ttl                  time.Duration
 	key                  *rsa.PrivateKey
 }
@@ -122,7 +123,11 @@ func (i *issuer) mint(t *testing.T, a assertion) string {
 	now := time.Now()
 	jti := make([]byte, 8)
 	_, _ = rand.Read(jti)
-	var groups any = []string{fmt.Sprintf("/workspaces/%s/%s", a.workspace, a.role)}
+	list := []string{fmt.Sprintf("/workspaces/%s/%s", a.workspace, a.role)}
+	if a.operator {
+		list = append(list, "/platform/operator")
+	}
+	var groups any = list
 	if a.groups != nil {
 		groups = a.groups
 	}
@@ -324,16 +329,16 @@ func uniqueSub(t *testing.T) string {
 
 // ---- the tests ----------------------------------------------------------------------------
 
-// ADR 0077: Grafana admits operators only — an owner acting in an access.workspaces workspace —
-// as Editor, who can query Loki. Every other owner, and everyone and everything else, is
-// refused outright, never admitted at a lower role.
-func TestAdmission_OperatorsOnly(t *testing.T) {
+// ADR 0077 + ADR 0094: Grafana admits platform operators only — assertions whose groups hold
+// /platform/operator — as Editor, who can query Loki, whatever their role in the active
+// workspace. Everyone and everything else is refused outright, never admitted at a lower role.
+func TestAdmission_PlatformOperatorsOnly(t *testing.T) {
 	lokiURL := lokitest.URL(t)
 	iss := newIssuer(t)
-	g := startGrafana(t, iss, "--set", "access.workspaces={platform}")
+	g := startGrafana(t, iss)
 
-	t.Run("an operator is admitted as the configured role", func(t *testing.T) {
-		role, r := g.orgRole(t, iss.mint(t, assertion{sub: uniqueSub(t), workspace: "platform", role: "owner"}))
+	t.Run("a platform operator is admitted as the configured role", func(t *testing.T) {
+		role, r := g.orgRole(t, iss.mint(t, assertion{sub: uniqueSub(t), workspace: "acme", role: "viewer", operator: true}))
 		if role != "Editor" {
 			t.Fatalf("role = %q (%d %s), want Editor", role, r.status, r.body)
 		}
@@ -343,12 +348,17 @@ func TestAdmission_OperatorsOnly(t *testing.T) {
 		name  string
 		token func() string
 	}{
-		// The case ADR 0077 exists for: an owner, but not an operator.
-		{"owner of a non-operator workspace", func() string {
+		// Exactly what booth-core mints today, before ADR 0094's amendment: a workspace owner and
+		// nothing else. Refused — which is why nobody gets Grafana until core ships the claim.
+		{"workspace owner without /platform/operator (core's current assertion)", func() string {
 			return iss.mint(t, assertion{sub: uniqueSub(t), workspace: "acme", role: "owner"})
 		}},
-		{"editor", func() string { return iss.mint(t, assertion{sub: uniqueSub(t), workspace: "platform", role: "editor"}) }},
-		{"viewer", func() string { return iss.mint(t, assertion{sub: uniqueSub(t), workspace: "platform", role: "viewer"}) }},
+		// ADR 0067's stopgap shape grants nothing any more.
+		{"owner of a workspace named platform", func() string {
+			return iss.mint(t, assertion{sub: uniqueSub(t), workspace: "platform", role: "owner"})
+		}},
+		{"editor", func() string { return iss.mint(t, assertion{sub: uniqueSub(t), workspace: "acme", role: "editor"}) }},
+		{"viewer", func() string { return iss.mint(t, assertion{sub: uniqueSub(t), workspace: "acme", role: "viewer"}) }},
 		{"no groups claim", func() string {
 			return iss.mint(t, assertion{sub: uniqueSub(t), groups: []string{}})
 		}},
@@ -356,17 +366,17 @@ func TestAdmission_OperatorsOnly(t *testing.T) {
 			return iss.mint(t, assertion{sub: uniqueSub(t), groups: "/workspaces/acme/owner"})
 		}},
 		{"operator, wrong audience (a token minted for another module)", func() string {
-			return iss.mint(t, assertion{sub: uniqueSub(t), workspace: "platform", role: "owner", aud: "logging"})
+			return iss.mint(t, assertion{sub: uniqueSub(t), workspace: "acme", role: "owner", operator: true, aud: "logging"})
 		}},
 		{"operator, wrong issuer", func() string {
-			return iss.mint(t, assertion{sub: uniqueSub(t), workspace: "platform", role: "owner", iss: "http://evil.example/iframe-identity"})
+			return iss.mint(t, assertion{sub: uniqueSub(t), workspace: "acme", role: "owner", operator: true, iss: "http://evil.example/iframe-identity"})
 		}},
 		{"operator, expired", func() string {
-			return iss.mint(t, assertion{sub: uniqueSub(t), workspace: "platform", role: "owner", ttl: -time.Minute})
+			return iss.mint(t, assertion{sub: uniqueSub(t), workspace: "acme", role: "owner", operator: true, ttl: -time.Minute})
 		}},
 		{"operator, signed by a key core doesn't hold", func() string {
 			k, _ := rsa.GenerateKey(rand.Reader, 2048)
-			return iss.mint(t, assertion{sub: uniqueSub(t), workspace: "platform", role: "owner", key: k})
+			return iss.mint(t, assertion{sub: uniqueSub(t), workspace: "acme", role: "owner", operator: true, key: k})
 		}},
 		{"no assertion at all (no anonymous access)", func() string { return "" }},
 	} {
@@ -378,13 +388,13 @@ func TestAdmission_OperatorsOnly(t *testing.T) {
 		})
 	}
 
-	t.Run("losing ownership locks an admitted person out on their next request", func(t *testing.T) {
+	t.Run("losing /platform/operator locks an admitted person out on their next request", func(t *testing.T) {
 		sub := uniqueSub(t)
-		if role, r := g.orgRole(t, iss.mint(t, assertion{sub: sub, workspace: "platform", role: "owner"})); role != "Editor" {
+		if role, r := g.orgRole(t, iss.mint(t, assertion{sub: sub, workspace: "acme", role: "owner", operator: true})); role != "Editor" {
 			t.Fatalf("first login: %q %d %s", role, r.status, r.body)
 		}
-		if role, r := g.orgRole(t, iss.mint(t, assertion{sub: sub, workspace: "platform", role: "viewer"})); role != "" {
-			t.Fatalf("demoted person still admitted as %q (%d)", role, r.status)
+		if role, r := g.orgRole(t, iss.mint(t, assertion{sub: sub, workspace: "acme", role: "owner"})); role != "" {
+			t.Fatalf("person without the claim still admitted as %q (%d)", role, r.status)
 		}
 	})
 
@@ -394,7 +404,7 @@ func TestAdmission_OperatorsOnly(t *testing.T) {
 		g.assertNoPluginInstaller(t)
 		mod := lokitest.UniqueModule(t)
 		lokitest.Push(t, lokiURL, map[string]string{"module": mod}, lokitest.Line{At: time.Now(), Text: "hello from " + mod})
-		token := iss.mint(t, assertion{sub: uniqueSub(t), workspace: "platform", role: "owner"})
+		token := iss.mint(t, assertion{sub: uniqueSub(t), workspace: "acme", role: "viewer", operator: true})
 		q := map[string]any{
 			"from": "now-10m", "to": "now",
 			"queries": []any{map[string]any{"refId": "A", "datasource": map[string]string{"uid": "booth-loki"},
@@ -402,6 +412,9 @@ func TestAdmission_OperatorsOnly(t *testing.T) {
 		}
 		lokitest.Eventually(t, 20*time.Second, func() bool {
 			r := g.do(t, "POST", "/api/ds/query", token, q)
+			// Any failure is fatal — deliberately no retry on "plugin.notRegistered": that was
+			// Grafana's background plugin installer breaking the Loki plugin on a read-only root
+			// (fixed by [plugins] preinstall_disabled), and must stay visible if it returns.
 			if r.status != 200 {
 				t.Fatalf("ds/query: %d %s", r.status, r.body)
 			}
@@ -410,7 +423,7 @@ func TestAdmission_OperatorsOnly(t *testing.T) {
 	})
 
 	t.Run("an admitted person cannot reconfigure data sources or users", func(t *testing.T) {
-		token := iss.mint(t, assertion{sub: uniqueSub(t), workspace: "platform", role: "owner"})
+		token := iss.mint(t, assertion{sub: uniqueSub(t), workspace: "acme", role: "viewer", operator: true})
 		if r := g.do(t, "POST", "/api/datasources", token, map[string]any{"name": "x", "type": "loki", "url": "http://169.254.169.254", "access": "proxy"}); r.status != 403 {
 			t.Errorf("creating a data source: %d %s, want 403", r.status, r.body)
 		}
@@ -436,24 +449,27 @@ func TestAdmission_OperatorsOnly(t *testing.T) {
 	})
 }
 
-// With access.workspaces set, only owners acting in a listed workspace get in.
-func TestAdmission_Allowlist(t *testing.T) {
+// Only the exact string "/platform/operator" admits; near misses and the old stopgap shape don't.
+func TestAdmission_ExactClaim(t *testing.T) {
 	lokitest.URL(t)
 	iss := newIssuer(t)
-	g := startGrafana(t, iss, "--set", "access.workspaces={platform,ops}")
+	g := startGrafana(t, iss)
 
 	for _, tc := range []struct {
-		workspace, role, want string
+		name   string
+		groups []string
+		want   string
 	}{
-		{"platform", "owner", "Editor"},
-		{"ops", "owner", "Editor"},
-		{"acme", "owner", ""},      // an owner, but not of an operator workspace (ADR 0077)
-		{"platform", "editor", ""}, // on the list, but not an owner
-		{"platformx", "owner", ""}, // near-miss slug
-		{"xplatform", "owner", ""},
+		{"operator alone", []string{"/platform/operator"}, "Editor"},
+		{"operator with a workspace role", []string{"/workspaces/acme/viewer", "/platform/operator"}, "Editor"},
+		{"trailing slash", []string{"/workspaces/acme/owner", "/platform/operator/"}, ""},
+		{"plural", []string{"/workspaces/acme/owner", "/platform/operators"}, ""},
+		{"case", []string{"/workspaces/acme/owner", "/Platform/operator"}, ""},
+		{"no leading slash", []string{"/workspaces/acme/owner", "platform/operator"}, ""},
+		{"ADR 0067's stopgap shape", []string{"/workspaces/platform/owner"}, ""},
 	} {
-		t.Run(tc.role+"@"+tc.workspace, func(t *testing.T) {
-			role, r := g.orgRole(t, iss.mint(t, assertion{sub: uniqueSub(t), workspace: tc.workspace, role: tc.role}))
+		t.Run(tc.name, func(t *testing.T) {
+			role, r := g.orgRole(t, iss.mint(t, assertion{sub: uniqueSub(t), groups: tc.groups}))
 			if role != tc.want {
 				t.Fatalf("role = %q (%d %s), want %q", role, r.status, r.body, tc.want)
 			}
@@ -477,10 +493,10 @@ func TestRoleAttributePath_Rendered(t *testing.T) {
 		}
 		return string(m[1])
 	}
-	if got := render("--set", "access.workspaces={platform}", "--set", "oidc.groupsClaim=memberships"); !strings.Contains(got, `"memberships"`) {
+	if got := render("--set", "oidc.groupsClaim=memberships"); !strings.Contains(got, `"memberships"`) {
 		t.Errorf("expression ignores oidc.groupsClaim: %s", got)
 	}
-	if got := render("--set", "access.workspaces={platform}"); strings.Contains(got, "ends_with") || strings.Contains(got, "starts_with") {
-		t.Errorf("the expression must match whole group strings of operator workspaces, never any owner: %s", got)
+	if got := render(); strings.Contains(got, "ends_with") || strings.Contains(got, "starts_with") || strings.Contains(got, "/workspaces/") {
+		t.Errorf("the expression must match /platform/operator exactly and nothing workspace-shaped: %s", got)
 	}
 }

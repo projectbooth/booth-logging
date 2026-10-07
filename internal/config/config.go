@@ -6,7 +6,6 @@ package config
 import (
 	"fmt"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/projectbooth/booth-logging/internal/auth"
@@ -33,18 +32,13 @@ type Config struct {
 
 	// MaxQueryRange caps one query's time span; 0 means "same as Retention".
 	MaxQueryRange time.Duration
-
-	// AccessWorkspaces limits log access to owners of these workspaces; empty means an
-	// owner of any workspace (docs/decisions/0002).
-	AccessWorkspaces []string
 }
 
 // Load reads configuration from the environment.
 func Load() (Config, error) {
 	cfg := Config{
-		HTTPAddr:         getEnv("BOOTH_HTTP_ADDR", ":8080"),
-		LokiURL:          os.Getenv("BOOTH_LOKI_URL"),
-		AccessWorkspaces: splitNonEmpty(os.Getenv("BOOTH_LOGGING_ACCESS_WORKSPACES")),
+		HTTPAddr: getEnv("BOOTH_HTTP_ADDR", ":8080"),
+		LokiURL:  os.Getenv("BOOTH_LOKI_URL"),
 		OIDC: auth.OIDCConfig{
 			IssuerURL:         os.Getenv("BOOTH_OIDC_ISSUER_URL"),
 			ClientID:          os.Getenv("BOOTH_OIDC_CLIENT_ID"),
@@ -94,14 +88,4 @@ func getEnv(key, fallback string) string {
 		return v
 	}
 	return fallback
-}
-
-func splitNonEmpty(v string) []string {
-	var out []string
-	for _, part := range strings.Split(v, ",") {
-		if part = strings.TrimSpace(part); part != "" {
-			out = append(out, part)
-		}
-	}
-	return out
 }

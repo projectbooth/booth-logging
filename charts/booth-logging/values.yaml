@@ -29,21 +29,13 @@ oidc:
   # Optional: booth-core's issuer URL, to also accept its workload tokens (ADR 0056).
   workloadIssuerUrl: ""
 
-# Who may read which logs (ADR 0067 as amended by ADR 0077). Only workspace owners ever read
-# logs; editors and viewers read nothing.
-#
-# workspaces lists the OPERATOR workspaces. An owner acting in one of them is an operator and
-# reads everything: every module's and every pod's logs, platform-wide. Any other owner reads
-# only the logs of pods labelled booth.projectbooth.io/workspace=<their active workspace>
-# (their workspace's own pods, e.g. its notebook servers). That pin is applied server-side, and
-# the label comes from pod metadata, never log content. Shared module pods (core, storage,
-# catalog, ...) carry no workspace label and are invisible to them.
-#
-# workspaces: [] (the default) means no operators: every owner is scoped to their own workspace,
-# nobody can read shared platform logs, and the Grafana view isn't deployed. Typically list one
-# dedicated workspace, e.g. [platform]. See docs/decisions/0002 and 0008.
-access:
-  workspaces: []
+# Who may read which logs (ADR 0067 as amended by ADR 0077) is not a chart setting. Platform
+# operators — anyone whose token's groups claim holds "/platform/operator" (ADR 0094), granted
+# in the identity provider — read everything. Every other workspace owner reads only the logs of
+# pods labelled booth.projectbooth.io/workspace=<their active workspace> (e.g. its notebook
+# servers); shared module pods (core, storage, catalog, ...) are invisible to them. Editors and
+# viewers read nothing. (access.workspaces, the old operator list, was removed by ADR 0094; the
+# chart refuses it rather than silently ignoring it.)
 
 # Optional cap on one query's time span, as a Go duration (e.g. "24h"). Empty means the
 # full retention window.
@@ -134,10 +126,11 @@ collector:
 # viewer.
 #
 # !! OPERATORS ONLY (ADR 0077). Grafana runs arbitrary LogQL over every tenant's logs, which
-# !! can't be pinned to one workspace, so only owners acting in an access.workspaces workspace
-# !! are admitted. Every other owner is refused outright, not admitted at a lower role. With
-# !! access.workspaces empty there are no operators, so none of this is deployed at all:
-# !! no Grafana, no nav entry.
+# !! can't be pinned to one workspace, so only platform operators — "/platform/operator" in the
+# !! groups claim (ADR 0094) — are admitted. Everyone else is refused outright, not admitted at
+# !! a lower role.
+# !! Until booth-core carries /platform/operator into its X-Booth-Identity assertion (ADR 0094's
+# !! amendment), NOBODY is admitted: the view is deployed but refuses everyone.
 #
 # Authentication is Grafana's own JWT auth over the X-Booth-Identity assertion booth-core signs
 # on every iframe-proxied request (ADR 0069), verified against core's keys: no Grafana login,

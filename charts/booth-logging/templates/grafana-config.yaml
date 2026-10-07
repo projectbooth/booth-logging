@@ -62,8 +62,10 @@ data:
     expect_claims = {"iss": {{ $issuer | quote }}, "aud": ["logging-grafana"]}
     username_claim = sub
     auto_sign_up = true
-    ; The admission gate (ADR 0077: operators only): resolves to {{ .Values.grafana.admittedRole }}
-    ; for an owner acting in one of {{ join ", " .Values.access.workspaces }}, else to ''. With
+    ; The admission gate (ADR 0077: operators only; ADR 0094: an operator holds /platform/operator)
+    ; resolves to {{ .Values.grafana.admittedRole }} when the assertion's groups contain
+    ; "/platform/operator", else to ''. Nobody matches until booth-core carries that entry into
+    ; X-Booth-Identity (ADR 0094's amendment). With
     ; role_attribute_strict, '' refuses the login outright rather than falling back to a
     ; default role. Role sync runs on every request, so losing ownership locks a user out at once.
     role_attribute_path = {{ include "booth-logging.grafanaRoleAttributePath" . }}

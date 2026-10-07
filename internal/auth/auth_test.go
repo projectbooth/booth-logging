@@ -485,3 +485,46 @@ func TestVerifier_ReadsGroupsClaim(t *testing.T) {
 		}
 	}
 }
+
+// ADR 0094: only the exact string "/platform/operator" makes someone a platform operator.
+func TestIsPlatformOperator(t *testing.T) {
+	for _, tc := range []struct {
+		groups []string
+		want   bool
+	}{
+		{[]string{"/platform/operator"}, true},
+		{[]string{"/workspaces/acme/viewer", "/platform/operator"}, true},
+		{nil, false},
+		{[]string{"/workspaces/platform/owner"}, false}, // ADR 0067's stopgap shape no longer counts
+		{[]string{"/platform/operator/"}, false},
+		{[]string{"/platform/operators"}, false},
+		{[]string{"/Platform/operator"}, false},
+		{[]string{"platform/operator"}, false},
+		{[]string{" /platform/operator"}, false},
+	} {
+		if got := IsPlatformOperator(tc.groups); got != tc.want {
+			t.Errorf("IsPlatformOperator(%q) = %v, want %v", tc.groups, got, tc.want)
+		}
+	}
+}
+
+// The middleware sets PlatformOperator from the verified token's groups, whatever the
+// caller's role in the active workspace, and never from a header.
+func TestMiddleware_PlatformOperator(t *testing.T) {
+	verifier := stubVerifier{
+		"op":    &Claims{Subject: "o", Groups: []string{"/workspaces/acme/viewer", "/platform/operator"}},
+		"plain": &Claims{Subject: "p", Groups: []string{"/workspaces/acme/owner"}},
+	}
+	for token, want := range map[string]bool{"op": true, "plain": false} {
+		var seen Identity
+		h := Middleware(verifier)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { seen, _ = FromContext(r.Context()) }))
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set(HeaderBoothWorkspace, "acme")
+		req.Header.Set("X-Booth-Platform-Operator", "true") // no such header is honoured
+		h.ServeHTTP(httptest.NewRecorder(), req)
+		if seen.PlatformOperator != want {
+			t.Errorf("%s: PlatformOperator = %v, want %v", token, seen.PlatformOperator, want)
+		}
+	}
+}

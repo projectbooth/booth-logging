@@ -8,3 +8,4 @@ hack
 test
 **/*_test.go
 *.md
+booth-core

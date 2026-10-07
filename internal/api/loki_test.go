@@ -30,14 +30,14 @@ func TestRealLoki_ViewerQueryPath(t *testing.T) {
 	)
 	lokitest.Push(t, lokiURL, map[string]string{"module": other}, lokitest.Line{At: at(2), Text: `{"level":"error","msg":"database down elsewhere"}`})
 
-	h := NewRouter(Deps{Verifier: tokens, Loki: loki.New(lokiURL, nil), Access: operators, Retention: 14 * 24 * time.Hour})
+	h := NewRouter(Deps{Verifier: tokens, Loki: loki.New(lokiURL, nil), Retention: 14 * 24 * time.Hour})
 	query := func(v url.Values) LogsResponse {
 		t.Helper()
 		v.Set("start", strconv.FormatInt(now.Add(-2*time.Minute).UnixNano(), 10))
 		if v.Get("end") == "" {
 			v.Set("end", strconv.FormatInt(now.UnixNano(), 10))
 		}
-		rec := do(t, h, "owner-acme", "acme", "/api/logs?"+v.Encode())
+		rec := do(t, h, "operator-owner-acme", "acme", "/api/logs?"+v.Encode())
 		if rec.Code != 200 {
 			t.Fatalf("%s: %d %s", v.Encode(), rec.Code, rec.Body)
 		}
@@ -104,7 +104,7 @@ func TestRealLoki_ViewerQueryPath(t *testing.T) {
 	})
 
 	t.Run("modules list", func(t *testing.T) {
-		rec := do(t, h, "owner-acme", "acme", "/api/modules")
+		rec := do(t, h, "operator-owner-acme", "acme", "/api/modules")
 		m := decode[map[string][]string](t, rec)
 		found := 0
 		for _, v := range m["modules"] {
@@ -136,9 +136,9 @@ func TestRealLoki_WorkspaceScoping(t *testing.T) {
 	)
 
 	tokens["owner-scoped"] = &auth.Claims{Subject: "erin", Groups: []string{"/workspaces/" + ws + "/owner"}}
-	tokens["owner-ops"] = &auth.Claims{Subject: "ops", Groups: []string{"/workspaces/ops/owner"}}
-	t.Cleanup(func() { delete(tokens, "owner-scoped"); delete(tokens, "owner-ops") })
-	h := NewRouter(Deps{Verifier: tokens, Loki: loki.New(lokiURL, nil), Access: AccessPolicy{Workspaces: []string{"ops"}}, Retention: 14 * 24 * time.Hour})
+	tokens["operator"] = &auth.Claims{Subject: "ops", Groups: []string{"/workspaces/ops/viewer", "/platform/operator"}}
+	t.Cleanup(func() { delete(tokens, "owner-scoped"); delete(tokens, "operator") })
+	h := NewRouter(Deps{Verifier: tokens, Loki: loki.New(lokiURL, nil), Retention: 14 * 24 * time.Hour})
 
 	query := func(token, workspace string, extra url.Values) LogsResponse {
 		t.Helper()
@@ -152,7 +152,7 @@ func TestRealLoki_WorkspaceScoping(t *testing.T) {
 		}
 		return decode[LogsResponse](t, rec)
 	}
-	lokitest.Eventually(t, 15*time.Second, func() bool { return len(query("owner-ops", "ops", nil).Entries) == 4 })
+	lokitest.Eventually(t, 15*time.Second, func() bool { return len(query("operator", "ops", nil).Entries) == 4 })
 
 	r := query("owner-scoped", ws, nil)
 	if len(r.Entries) != 1 || r.Entries[0].Line != "mine" || r.Entries[0].Workspace != ws {

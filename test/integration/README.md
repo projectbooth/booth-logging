@@ -25,11 +25,12 @@ on merge to `main` and nightly. It deploys the chart into a kind cluster and run
   - the `fetch-jwks` init container fetched the stub's keys and Grafana became ready;
   - the `logging-grafana` BoothModule registered as `iframe-proxy` while `logging` stayed
     `native`;
-  - an operator's (an owner of `platform`, the chart's `access.workspaces` here) signed
-    assertion is admitted as `Editor` and queries the probe pod's lines from the real Loki
-    (proving Loki's NetworkPolicy admits Grafana);
-  - a non-operator owner's assertion (owner of `acme`) and an editor's are refused outright
-    (ADR 0077);
+  - a platform operator's signed assertion (groups holding `/platform/operator`, ADR 0094; the
+    stub mints the shape core will once ADR 0094's amendment ships) is admitted as `Editor` and
+    queries the probe pod's lines from the real Loki (proving Loki's NetworkPolicy admits
+    Grafana);
+  - an owner's assertion without the claim (exactly what core mints today) and an editor's are
+    refused outright;
   - a pod not labelled as booth-core can't reach Grafana at all.
 
 ## Where it has actually run
@@ -47,19 +48,41 @@ after 14 days isn't something a CI run can wait for.
 The Grafana steps and the workspace-label steps above were also run on that local kind cluster
 (2026-09-28) and passed.
 
+## Against a real booth-core (`real-core` job, `REAL_CORE=1`)
+
+[`realcore/deploy.sh`](realcore/deploy.sh) brings up the same stack booth-e2e's bring-up uses,
+on kind:
+- a real Keycloak in dev mode with [a test realm](realcore/realm-booth.json.tpl);
+- a real booth-core, built from source at a pinned commit (`CORE_REF` in `integration.yml`;
+  booth-core is a public repo, so no credential is needed) and installed from its own chart with
+  booth-e2e's values;
+- booth-logging trusting both. Grafana's issuer is left at the chart default, which must already
+  match a `booth-core` release in `booth-system`.
+
+`verify.sh`'s `REAL_CORE` section then runs, for each realm user, the real path: a password-grant
+token, core's `/api/modules/logging-grafana/iframe-url`, the iframe entry (session cookie), and
+Grafana's `/api/user/orgs` **through core's iframe proxy**. So core mints `X-Booth-Identity` from
+the real token's groups, and Grafana verifies it against core's real keys.
+- **Admitted as Editor:** an owner whose token carries `/platform/operator` (ADR 0094).
+- **Refused outright (403):** an owner without the claim, and owners holding the near misses
+  `/platform/operators` and `/platform/operator/readonly`.
+
+On top of that, every other `verify.sh` step runs against the same release. That covers core's
+controller reconciling both BoothModules to Healthy, and booth-logging's API verifying against a
+real OIDC provider at startup.
+
+**Run locally on 2026-10-07** against booth-core `264856f` (built from `git archive`), twice:
+passed. **Negative control:** the same run against booth-core `8f0c6b4`, the commit before core
+carried the claim, refuses the operator (403 `jwt.invalid_role`) and fails. So the check really
+depends on core's fix.
+
 ## Not covered yet
 
-- **The Grafana view behind a real booth-core and shell**: loaded through core's iframe proxy,
-  with core's real signing key and the shell's nginx `/iframe/` routing. The stub reproduces
-  core's assertion shape (from `internal/iframeidentity`'s `Mint`), not core itself.
-- **Deploying alongside a real, pinned booth-core**, going through its gateway, with its
-  controller reconciling the `BoothModule` and polling `/healthz`. This is the same gap as
-  booth-storage's (a cross-repo credential to pull core's pinned build). `booth-e2e` is the
-  intended home for the cross-module path.
-- **An authenticated request end-to-end** needs an OIDC provider in the cluster. Auth is
-  covered at the unit layer (booth-storage's in-process IdP tests, copied with
-  `internal/auth`). Owner/role/designated-workspace rules are covered in `internal/api`,
-  including the full query path against a real Loki.
+- **The shell's nginx `/iframe/` routing and a real browser.** The real-core check talks to
+  core's gateway directly, not through booth-design; booth-e2e covers the shell path.
+- **booth-logging's own API with a real user token.** Its startup verifies against the real
+  Keycloak, but no logs request is made with a Keycloak token. Owner/operator/scoping rules are
+  covered in `internal/api`, including the full query path against a real Loki.
 
 ## The OIDC issuer used in CI
 

@@ -8,7 +8,12 @@ outside `access.workspaces` now read only their own workspace's labelled pods; o
 an `access.workspaces` workspace ("operators") read everything; with no operators configured,
 nobody reads shared platform logs. The "per-workspace filtering isn't feasible" point below was
 wrong in one respect: platform-set pod labels, unlike log content, can be trusted. See
-[0008](0008-workspace-scoping.md). The original reasoning is kept below as written.
+[0008](0008-workspace-scoping.md).
+
+**Mechanism superseded by ADR 0094 (2026-09-30).** `access.workspaces` is gone: a platform
+operator is now anyone whose token's groups claim holds `/platform/operator`, whatever
+workspace they're acting in. The policy (operators read everything; other owners only their
+own workspace's labelled pods) is unchanged. The original reasoning is kept below as written.
 
 ## The gap
 

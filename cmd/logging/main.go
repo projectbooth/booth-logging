@@ -52,12 +52,11 @@ func run() error {
 		return fmt.Errorf("loading config: %w", err)
 	}
 
-	// ADR 0077: operators (owners acting in access.workspaces) read everything; every other
-	// owner only their own workspace's labeled pods.
-	if len(cfg.AccessWorkspaces) == 0 {
-		slog.Info("no operator workspaces configured: every owner reads only their own workspace's pods; nobody can read shared platform logs (set access.workspaces to name operator workspaces)")
-	} else {
-		slog.Info("operators (owners of these workspaces) read all logs; other owners only their own workspace's pods", "operatorWorkspaces", cfg.AccessWorkspaces)
+	// ADR 0077's access policy, with operators identified per ADR 0094: nothing to configure, so
+	// say how it works rather than what's configured.
+	slog.Info("platform operators (/platform/operator in the token's groups claim) read all logs; every other owner reads only their own workspace's pods; if nobody holds /platform/operator, nobody can read shared platform logs")
+	if os.Getenv("BOOTH_LOGGING_ACCESS_WORKSPACES") != "" {
+		slog.Warn("BOOTH_LOGGING_ACCESS_WORKSPACES is set but no longer used: operators are identified by the /platform/operator claim (ADR 0094)")
 	}
 
 	verifier, err := auth.NewVerifier(ctx, cfg.OIDC)
@@ -70,7 +69,6 @@ func run() error {
 		Handler: api.NewRouter(api.Deps{
 			Verifier:      verifier,
 			Loki:          loki.New(cfg.LokiURL, nil),
-			Access:        api.AccessPolicy{Workspaces: cfg.AccessWorkspaces},
 			Retention:     cfg.Retention,
 			MaxQueryRange: cfg.MaxQueryRange,
 		}),
@@ -120,5 +118,7 @@ func fetchJWKS(args []string) error {
 		return err
 	}
 	slog.Info("wrote booth-core's iframe-identity keys for Grafana", "issuer", *issuer, "out", *out)
+	// Grafana has no start-up log of ours, so the note lives here (ADR 0094).
+	slog.Info("Grafana admits only platform operators: X-Booth-Identity assertions whose groups hold /platform/operator. booth-core doesn't carry that entry into its assertions until ADR 0094's amendment ships; until then nobody is admitted, which is expected, not broken.")
 	return nil
 }

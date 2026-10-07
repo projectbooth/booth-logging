@@ -3,9 +3,12 @@ name: Integration
 # Layer 3 (contracts/testing-strategy.md, ADR 0024): the chart deployed to a real kind
 # cluster, then test/integration/verify.sh — the collector really tails pods, Loki really
 # stores and labels what it ships, the NetworkPolicies really close Loki and Grafana, and the
-# Grafana view (ADR 0076) fetches its keys and admits only owners. No real booth-core runs
-# here, so a stub of core's iframe-identity issuer (test/integration/stubcore) supplies the keys
-# and signed assertions. Runs on merge to main and nightly.
+# Grafana view (ADR 0076) fetches its keys and admits only operators.
+#
+# Two jobs: kind-deploy uses a stub of core's iframe-identity issuer (test/integration/stubcore)
+# and needs no identity provider; real-core runs a real booth-core (built from source at a pinned
+# commit) and a real Keycloak, and checks Grafana admission end to end through core's own iframe
+# proxy (ADR 0069/0094). Runs on merge to main and nightly.
 on:
   push:
     branches: [main]
@@ -62,7 +65,6 @@ jobs:
             --set oidc.clientId=booth-logging-ci \
             --set oidc.requireAudience=false \
             --set grafana.identity.issuerUrl="$ISSUER" \
-            --set 'access.workspaces={platform}' \
             --wait --timeout 6m
 
       - name: Verify
@@ -79,3 +81,56 @@ jobs:
           kubectl -n booth-logging logs statefulset/booth-logging-loki --tail=100 || true
           kubectl -n booth-logging logs deployment/booth-logging --tail=100 || true
           kubectl -n booth-logging logs deployment/booth-logging-grafana --all-containers --tail=100 || true
+
+  real-core:
+    # Grafana admission through a REAL booth-core (ADR 0069/0094): a real Keycloak password-grant
+    # token → core's iframe-url → the iframe session cookie → core's iframe proxy minting
+    # X-Booth-Identity from the token's groups → Grafana verifying it against core's real keys.
+    # booth-core is public, so it's checked out and built at a pinned commit (not its moving
+    # branch, contracts/testing-strategy.md); bump CORE_REF deliberately. 264856f is the first
+    # core that carries /platform/operator into X-Booth-Identity.
+    runs-on: ubuntu-latest
+    env:
+      CORE_REF: 264856f7872e7831888a1d7add15d91e4f75619c
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/checkout@v4
+        with:
+          repository: projectbooth/booth-core
+          ref: ${{ env.CORE_REF }}
+          path: booth-core
+
+      - uses: helm/kind-action@v1
+        with:
+          cluster_name: booth-logging-realcore
+
+      - uses: azure/setup-helm@v4
+
+      - name: Build and load booth-core and booth-logging images
+        run: |
+          # dependency build (not update) installs exactly what core's Chart.lock pins; it needs the
+          # chart repository registered first.
+          helm repo add nats https://nats-io.github.io/k8s/helm/charts/
+          helm dependency build booth-core/charts/booth-core
+          docker build -t booth-core:ci booth-core
+          docker build -t booth-logging:ci .
+          kind load docker-image booth-core:ci booth-logging:ci --name booth-logging-realcore
+
+      - name: Deploy Keycloak, booth-core and booth-logging
+        run: test/integration/realcore/deploy.sh booth-core booth-core:ci booth-logging:ci
+
+      - name: Verify (including the REAL_CORE admission checks)
+        env:
+          REAL_CORE: "1"
+        run: test/integration/verify.sh
+
+      - name: Dump state on failure
+        if: failure()
+        run: |
+          kubectl get pods -A
+          kubectl -n keycloak logs deployment/keycloak --tail=60 || true
+          kubectl -n booth-system logs deployment/booth-core --tail=120 || true
+          kubectl get boothmodules -A -o wide || true
+          kubectl -n booth-logging logs deployment/booth-logging-grafana --all-containers --tail=100 || true
+          kubectl -n booth-logging logs deployment/booth-logging --tail=60 || true
