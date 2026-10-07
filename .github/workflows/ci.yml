@@ -14,7 +14,7 @@ permissions:
 
 jobs:
   go-test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
@@ -67,7 +67,7 @@ jobs:
   collector-config:
     # The collector's pipeline is Alloy configuration, not Go: check the rendered config
     # parses with the exact Alloy version the chart deploys.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: azure/setup-helm@v4
@@ -83,7 +83,7 @@ jobs:
           done
 
   web-test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: web
@@ -103,7 +103,7 @@ jobs:
       - run: npm run build
 
   helm-lint:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: azure/setup-helm@v4
@@ -129,7 +129,7 @@ jobs:
 
   image-build:
     # Catches a broken Dockerfile on the PR that breaks it, not at release time. Not pushed.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
