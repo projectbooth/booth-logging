@@ -28,6 +28,13 @@ oidc:
   groupsClaim: groups
   # Optional: booth-core's issuer URL, to also accept its workload tokens (ADR 0056).
   workloadIssuerUrl: ""
+  # Optional key-fetch override (ADR 0108): fetch the identity provider's signing keys from
+  # this URL instead of discovery against issuerUrl, while still validating `iss` exactly
+  # against issuerUrl. A bundled install sets it to Keycloak's in-cluster Service over plain
+  # http. That fetch is unauthenticated and unencrypted, so it relies on NetworkPolicy and
+  # cluster trust. Setting it without issuerUrl is a startup error. Empty (the default) means
+  # ordinary discovery, unchanged. Applies to this module's API only, not the Grafana view.
+  jwksUrl: ""
 
 # Who may read which logs (ADR 0067 as amended by ADR 0077) is not a chart setting. Platform
 # operators — anyone whose token's groups claim holds "/platform/operator" (ADR 0094), granted

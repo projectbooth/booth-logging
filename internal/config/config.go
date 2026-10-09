@@ -45,6 +45,8 @@ func Load() (Config, error) {
 			RequireAudience:   os.Getenv("BOOTH_OIDC_REQUIRE_AUDIENCE") == "true",
 			GroupsClaim:       getEnv("BOOTH_OIDC_GROUPS_CLAIM", auth.DefaultGroupsClaim),
 			WorkloadIssuerURL: os.Getenv("BOOTH_WORKLOAD_ISSUER_URL"),
+			// Optional key-fetch override (ADR 0108); see auth.OIDCConfig.JWKSURL.
+			JWKSURL: os.Getenv("BOOTH_OIDC_JWKS_URL"),
 		},
 	}
 
@@ -59,6 +61,11 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("BOOTH_LOGGING_RETENTION must be positive")
 	}
 
+	// Checked before the generic "issuer required" so the message names the real mistake: a
+	// key-fetch override for an issuer that isn't set (ADR 0108).
+	if cfg.OIDC.JWKSURL != "" && cfg.OIDC.IssuerURL == "" {
+		return Config{}, fmt.Errorf("BOOTH_OIDC_JWKS_URL is set but BOOTH_OIDC_ISSUER_URL is empty: the issuer is still required to validate `iss`")
+	}
 	if cfg.OIDC.IssuerURL == "" {
 		return Config{}, fmt.Errorf("BOOTH_OIDC_ISSUER_URL is required")
 	}

@@ -153,6 +153,16 @@ register it: `registerNativeModule("logging", LoggingApp)`.
 
 ## Read before deploying
 
+- **Key-fetch override** (`oidc.jwksUrl`, env `BOOTH_OIDC_JWKS_URL`; ADR 0108). Empty, the
+  default, means unchanged behaviour: the API discovers the identity provider's keys from
+  `oidc.issuerUrl`. When set, the API skips discovery and fetches signing keys straight from
+  that URL, but still checks every token's `iss` exactly against `oidc.issuerUrl`. A bundled
+  install points it at Keycloak's in-cluster Service over plain http, so this pod never needs to
+  reach or trust the browser-facing https issuer. **Trust assumption:** that key fetch is
+  in-cluster, unauthenticated and unencrypted, so it relies on NetworkPolicy and cluster trust.
+  Setting it without `oidc.issuerUrl` is a startup error. The effective issuer and key source are
+  logged once at startup. It applies to this module's API only; the Grafana view trusts
+  booth-core's iframe-identity issuer and is unaffected.
 - **Access** (ADR 0067 as amended by ADR 0077; operators per ADR 0094;
   [0008](docs/decisions/0008-workspace-scoping.md)): nothing to configure in this chart.
   **Platform operators** are whoever the identity provider grants the `/platform/operator`

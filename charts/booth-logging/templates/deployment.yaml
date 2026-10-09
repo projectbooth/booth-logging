@@ -56,6 +56,10 @@ spec:
             - name: BOOTH_WORKLOAD_ISSUER_URL
               value: {{ . | quote }}
             {{- end }}
+            {{- with .Values.oidc.jwksUrl }}
+            - name: BOOTH_OIDC_JWKS_URL
+              value: {{ . | quote }}
+            {{- end }}
           # /healthz (readiness, and what core polls) reflects Loki's readiness; /livez
           # doesn't, because restarting this pod can't fix Loki.
           livenessProbe:

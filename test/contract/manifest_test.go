@@ -570,3 +570,19 @@ func TestChart_NoOperatorAllowlist(t *testing.T) {
 		t.Error("values.yaml still defines access")
 	}
 }
+
+// ADR 0108: oidc.jwksUrl reaches the API as BOOTH_OIDC_JWKS_URL only when set; nothing is rendered
+// by default (ordinary discovery). It never touches the Grafana view's own issuer settings.
+func TestChart_JWKSURL(t *testing.T) {
+	if bytes.Contains(helmTemplate(t, ""), []byte("BOOTH_OIDC_JWKS_URL")) {
+		t.Error("BOOTH_OIDC_JWKS_URL rendered by default; empty must mean discovery, unchanged")
+	}
+	const keys = "http://keycloak.keycloak.svc:8080/realms/booth/protocol/openid-connect/certs"
+	dep := helmTemplate(t, "templates/deployment.yaml", "--set", "oidc.jwksUrl="+keys)
+	if !regexp.MustCompile(`BOOTH_OIDC_JWKS_URL\s+value: "` + regexp.QuoteMeta(keys) + `"`).Match(dep) {
+		t.Errorf("oidc.jwksUrl not passed through:\n%s", dep)
+	}
+	if !bytes.Equal(helmTemplate(t, "templates/grafana-config.yaml"), helmTemplate(t, "templates/grafana-config.yaml", "--set", "oidc.jwksUrl="+keys)) {
+		t.Error("oidc.jwksUrl changed the Grafana view's config; it applies to the API only")
+	}
+}
