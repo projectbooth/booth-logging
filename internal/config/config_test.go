@@ -1,6 +1,7 @@
 package config
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -53,5 +54,35 @@ func TestLoad_Errors(t *testing.T) {
 				t.Errorf("Load succeeded with %s=%q", env[0], env[1])
 			}
 		})
+	}
+}
+
+// ADR 0108's key-fetch override: read when set, empty (discovery) by default.
+func TestLoad_JWKSURL(t *testing.T) {
+	setRequired(t)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.OIDC.JWKSURL != "" {
+		t.Errorf("JWKSURL defaults to %q, want empty (discovery)", cfg.OIDC.JWKSURL)
+	}
+	t.Setenv("BOOTH_OIDC_JWKS_URL", "http://keycloak.keycloak.svc:8080/realms/booth/protocol/openid-connect/certs")
+	if cfg, err = Load(); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.OIDC.JWKSURL != "http://keycloak.keycloak.svc:8080/realms/booth/protocol/openid-connect/certs" {
+		t.Errorf("JWKSURL = %q", cfg.OIDC.JWKSURL)
+	}
+}
+
+// Setting the override without an issuer is a startup error that names the real mistake.
+func TestLoad_JWKSURLWithoutIssuer(t *testing.T) {
+	setRequired(t)
+	t.Setenv("BOOTH_OIDC_ISSUER_URL", "")
+	t.Setenv("BOOTH_OIDC_JWKS_URL", "http://keys.example/certs")
+	_, err := Load()
+	if err == nil || !strings.Contains(err.Error(), "BOOTH_OIDC_JWKS_URL is set but BOOTH_OIDC_ISSUER_URL is empty") {
+		t.Fatalf("err = %v, want the jwks-without-issuer error", err)
 	}
 }

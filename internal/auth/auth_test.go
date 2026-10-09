@@ -8,6 +8,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -526,5 +528,109 @@ func TestMiddleware_PlatformOperator(t *testing.T) {
 		if seen.PlatformOperator != want {
 			t.Errorf("%s: PlatformOperator = %v, want %v", token, seen.PlatformOperator, want)
 		}
+	}
+}
+
+// ---- ADR 0108: oidc.jwksUrl key-fetch override ---------------------------------------------
+
+// unreachableIssuer is an https issuer nothing can reach (.invalid never resolves), so any
+// attempt at discovery against it fails outright.
+const unreachableIssuer = "https://idp.invalid/realms/booth"
+
+// jwksOnlyServer serves the fake IdP's public key over plain http at /certs and counts every
+// request by path, so a test can prove discovery was never asked for.
+func jwksOnlyServer(t *testing.T, idp *fakeIdP) (url string, hits map[string]int) {
+	t.Helper()
+	hits = map[string]int{}
+	var mu sync.Mutex
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		hits[r.URL.Path]++
+		mu.Unlock()
+		if r.URL.Path != "/certs" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(jose.JSONWebKeySet{Keys: []jose.JSONWebKey{{Key: &idp.key.PublicKey, KeyID: "k1", Algorithm: "RS256", Use: "sig"}}})
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL + "/certs", hits
+}
+
+func TestJWKSURL_VerifiesWithoutDiscovery(t *testing.T) {
+	idp := newFakeIdP(t)
+	jwksURL, hits := jwksOnlyServer(t, idp)
+	ctx := context.Background()
+
+	// Discovery against an unreachable https issuer would fail here; with the override,
+	// construction doesn't touch the issuer at all.
+	v, err := NewVerifier(ctx, OIDCConfig{IssuerURL: unreachableIssuer, ClientID: "booth-logging", JWKSURL: jwksURL})
+	if err != nil {
+		t.Fatalf("NewVerifier: %v", err)
+	}
+
+	claims, err := v.Verify(ctx, idp.token(t, tokenOpts{issuer: unreachableIssuer, subject: "alice", groups: []string{"/workspaces/acme/owner"}}))
+	if err != nil {
+		t.Fatalf("a valid token from the configured issuer was rejected: %v", err)
+	}
+	if claims.Subject != "alice" || RoleInWorkspace(claims.Groups, "acme") != RoleOwner {
+		t.Errorf("claims = %+v", claims)
+	}
+
+	// Keys came from the override; nothing else on it — in particular no discovery document —
+	// was ever requested. (The issuer itself is unreachable, so it can't have been asked either.)
+	if hits["/certs"] == 0 {
+		t.Error("keys were never fetched from the jwksUrl")
+	}
+	for path, n := range hits {
+		if path != "/certs" {
+			t.Errorf("unexpected request to %s (%d times) on the key server", path, n)
+		}
+	}
+}
+
+// `iss` is still compared exactly against the configured issuer: the same key signing a token
+// that claims another issuer — including the key server's own URL, or a near miss — is refused.
+func TestJWKSURL_WrongIssuerRejected(t *testing.T) {
+	idp := newFakeIdP(t)
+	jwksURL, _ := jwksOnlyServer(t, idp)
+	ctx := context.Background()
+	v, err := NewVerifier(ctx, OIDCConfig{IssuerURL: unreachableIssuer, ClientID: "booth-logging", JWKSURL: jwksURL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, iss := range []string{
+		"https://evil.invalid/realms/booth",
+		strings.TrimSuffix(jwksURL, "/certs"),
+		unreachableIssuer + "/",
+		"http://idp.invalid/realms/booth",
+	} {
+		if _, err := v.Verify(ctx, idp.token(t, tokenOpts{issuer: iss, subject: "mallory"})); err == nil {
+			t.Errorf("token with iss=%q verified; want it rejected", iss)
+		}
+	}
+}
+
+// The override changes only where keys come from; the audience policy is untouched.
+func TestJWKSURL_AudiencePolicyUnchanged(t *testing.T) {
+	idp := newFakeIdP(t)
+	jwksURL, _ := jwksOnlyServer(t, idp)
+	ctx := context.Background()
+	v, err := NewVerifier(ctx, OIDCConfig{IssuerURL: unreachableIssuer, ClientID: "booth-logging", RequireAudience: true, JWKSURL: jwksURL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := v.Verify(ctx, idp.token(t, tokenOpts{issuer: unreachableIssuer, subject: "alice", audience: "booth-logging"})); err != nil {
+		t.Errorf("matching audience rejected: %v", err)
+	}
+	if _, err := v.Verify(ctx, idp.token(t, tokenOpts{issuer: unreachableIssuer, subject: "alice", audience: "someone-else"})); err == nil {
+		t.Error("wrong audience accepted")
+	}
+}
+
+func TestJWKSURL_RequiresIssuer(t *testing.T) {
+	_, err := NewVerifier(context.Background(), OIDCConfig{ClientID: "booth-logging", JWKSURL: "http://keys.example/certs"})
+	if err == nil || !strings.Contains(err.Error(), "oidc.jwksUrl is set but oidc.issuerUrl is empty") {
+		t.Fatalf("err = %v, want the jwks-without-issuer error", err)
 	}
 }
