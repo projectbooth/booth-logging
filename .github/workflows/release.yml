@@ -62,3 +62,12 @@ jobs:
         with:
           files: dist/*.tgz
           generate_release_notes: true
+
+      # ADR 0111: installs reference the chart as oci://ghcr.io/projectbooth/charts/booth-logging
+      # at the tagged version (booth-core's install API only understands OCI chart refs); the
+      # attached .tgz above stays for offline use. Same two steps as booth-core's release.yml.
+      - name: helm registry login (ghcr.io)
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io --username ${{ github.actor }} --password-stdin
+
+      - name: Push chart as an OCI artifact (ADR 0111)
+        run: helm push dist/booth-logging-${{ needs.image.outputs.version }}.tgz oci://ghcr.io/projectbooth/charts

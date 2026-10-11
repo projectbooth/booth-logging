@@ -126,6 +126,22 @@ jobs:
             --set oidc.issuerUrl=https://keycloak.example.com/realms/booth \
             --set oidc.clientId=booth-logging \
             --set grafana.enabled=false
+      - name: release packaging (what release.yml's chart job does, so it can't silently rot)
+        run: |
+          set -euo pipefail
+          v=0.0.0-ci
+          helm package charts/booth-logging --version "$v" --app-version "$v" --destination dist
+          helm lint "dist/booth-logging-$v.tgz" \
+            --set oidc.issuerUrl=https://keycloak.example.com/realms/booth \
+            --set oidc.clientId=booth-logging
+          # The chart deliberately has no default identity provider: an install must set these two.
+          out=$(helm template booth-logging "dist/booth-logging-$v.tgz" \
+            --set oidc.issuerUrl=https://keycloak.example.com/realms/booth \
+            --set oidc.clientId=booth-logging)
+          # Both uses of this repo's image (the API and Grafana's fetch-jwks init container) must
+          # follow the release version, with no image values set.
+          n=$(echo "$out" | grep -c "image: \"ghcr.io/projectbooth/booth-logging:$v\"")
+          [ "$n" -eq 2 ] || { echo "want 2 image refs ghcr.io/projectbooth/booth-logging:$v, got $n"; exit 1; }
 
   image-build:
     # Catches a broken Dockerfile on the PR that breaks it, not at release time. Not pushed.
