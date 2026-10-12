@@ -156,7 +156,9 @@ grafana:
     # the assertion's `iss`. Core's chart spells its default with ".svc.cluster.local:8080"
     # (not the shorter ".svc:8080" other booth URLs use); copying the wrong spelling refuses
     # every login. The default below matches core installed as release "booth-core" in
-    # namespace "booth-system" (booth-notebooks uses the same default).
+    # namespace "booth-system" (booth-notebooks uses the same default). Read only when
+    # grafana.enabled. An install through core's install API gets core's own value here
+    # (ADR 0113, the iframeIssuerUrl key of Chart.yaml's identity-keys annotation).
     issuerUrl: "http://booth-core.booth-system.svc.cluster.local:8080/iframe-identity"
 
   # The one Grafana role every admitted person gets. Editor, because Grafana's Explore (the

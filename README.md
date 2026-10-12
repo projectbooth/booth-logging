@@ -176,6 +176,14 @@ register it: `registerNativeModule("logging", LoggingApp)`.
   it on a shared module pod.
 - **Grafana's issuer URL** (`grafana.identity.issuerUrl`) must match booth-core's iframe-identity
   issuer exactly. The default assumes core is release `booth-core` in namespace `booth-system`.
+  It is read only when `grafana.enabled`; with the Grafana view off it has no effect.
+- **Identity settings supplied by core** (ADR 0113). `Chart.yaml` carries the
+  `booth.projectbooth.io/identity-keys` annotation, so an install through booth-core's install
+  API (the Module Store's Install button included) gets `oidc.issuerUrl`, `oidc.clientId`,
+  `oidc.jwksUrl`, `oidc.workloadIssuerUrl`, `oidc.groupsClaim` and `grafana.identity.issuerUrl`
+  filled in from core's own configuration. Any of them set explicitly in the install's values
+  wins. `grafana.identity.issuerUrl` (core's iframe-identity issuer) is read only when
+  `grafana.enabled`. A Helm CLI install is unchanged: set the values yourself.
 - **The collector runs as root** (uid 0, no capabilities, read-only root filesystem,
   `/var/log/pods` mounted read-only), because the kubelet's log files aren't world-readable. It
   holds a ClusterRole to get/list/watch **pods** (metadata only) and nothing else.
